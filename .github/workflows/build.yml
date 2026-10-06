@@ -1,4 +1,5 @@
 name: Build LineageOS 23 Shiba Kernel (KSU-Next + SUSFS)
+
 on:
   workflow_dispatch:
 
@@ -18,16 +19,16 @@ jobs:
           mkdir kernel_workspace && cd kernel_workspace
           git config --global user.name "Kernel Builder"
           git config --global user.email "bot@example.com"
-          # Added --fail-fast so the sync aborts immediately if the LineageOS servers drop the connection
           repo init -u https://github.com/LineageOS/android_kernel_google_gs-6.1_manifest.git -b lineage-23.0 --depth=1
           repo sync -c -j$(nproc) --no-clone-bundle --no-tags --fail-fast
 
       - name: Inject KernelSU Next & SUSFS
         run: |
-          set -e # Strict error handling: halts the entire build if any single command fails
+          set -e 
           
           cd kernel_workspace/aosp
-          curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" | bash -
+          # Updated to the new organizational URL to resolve the 404 exit code 127 error
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -
           
           cd ..
           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android14-6.1
@@ -36,8 +37,6 @@ jobs:
           cp -r susfs4ksu/kernel_patches/include/linux/* aosp/include/linux/
           
           cd aosp
-          # Removed "|| true" and added --no-backup-if-mismatch. 
-          # If LineageOS modifies the kernel and rejects these patches, the build will now intentionally crash so you can fix the conflict.
           patch -p1 --no-backup-if-mismatch < ../susfs4ksu/kernel_patches/50_recipe_for_6.1.patch
           patch -p1 --no-backup-if-mismatch < ../susfs4ksu/kernel_patches/fs/susfs_defconfig.patch
 
@@ -70,4 +69,4 @@ jobs:
         with:
           name: Shiba-Lineage23-Boot
           path: kernel_workspace/out/shiba/dist/
-          if-no-files-found: error # Prevents the workflow from succeeding if the kernel images are missing
+          if-no-files-found: error
