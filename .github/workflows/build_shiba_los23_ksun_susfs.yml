@@ -25,7 +25,6 @@ jobs:
       - name: Inject KernelSU Next & SUSFS
         run: |
           set -e 
-          mkdir -p $GITHUB_WORKSPACE/diagnostic_logs
           
           cd kernel_workspace/aosp
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -
@@ -37,14 +36,10 @@ jobs:
           cp -r susfs4ksu/kernel_patches/include/linux/* aosp/include/linux/
           
           cd aosp
-          
-          # 1. Temporarily add the missing header to base.c so the patch tool can find its anchor
           sed -i 's/#include <linux\/cpufreq_times.h>/#include <linux\/cpufreq_times.h>\n#include <linux\/dma-buf.h>/' fs/proc/base.c
           
-          # 2. Apply the patch cleanly and save verbose output to a log file
-          patch -p1 --no-backup-if-mismatch < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch 2>&1 | tee $GITHUB_WORKSPACE/diagnostic_logs/patch_injection.log
+          patch -p1 --no-backup-if-mismatch < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch
           
-          # 3. Remove the injected header to maintain source purity
           sed -i '/#include <linux\/dma-buf.h>/d' fs/proc/base.c
 
       - name: Configure and Build
@@ -69,20 +64,16 @@ jobs:
           EOF
           
           cd ..
-          # Build with verbose failures enabled and save output to a log file
-          tools/bazel run --config=fast --config=shusky --verbose_failures //private/devices/google/shusky:zuma_shusky_dist 2>&1 | tee $GITHUB_WORKSPACE/diagnostic_logs/bazel_build.log
+          tools/bazel run --config=fast --config=shusky //private/devices/google/shusky:zuma_shusky_dist
 
-      - name: Upload Diagnostic Logs
-        if: always()
+      - name: Validate and Upload Flashable Images
         uses: actions/upload-artifact@v4
         with:
-          name: Diagnostic-Logs
-          path: diagnostic_logs/
-          if-no-files-found: warn
-
-      - name: Validate and Upload Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: Shiba-Lineage23-Boot
-          path: kernel_workspace/out/**/dist/
+          name: Shiba-Lineage23-Images
+          path: |
+            kernel_workspace/out/**/dist/boot.img
+            kernel_workspace/out/**/dist/init_boot.img
+            kernel_workspace/out/**/dist/vendor_boot.img
+            kernel_workspace/out/**/dist/vendor_kernel_boot.img
+            kernel_workspace/out/**/dist/dtbo.img
           if-no-files-found: error
