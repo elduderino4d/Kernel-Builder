@@ -38,17 +38,15 @@ jobs:
           cd aosp
           PATCH_FILE="../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch"
           
-          # Use patchutils to split the patch into "everything else" and "the problematic file"
+          # Split the patch and isolate the conflicting file
           filterdiff -x 'a/fs/proc/base.c' -x 'b/fs/proc/base.c' $PATCH_FILE > main_susfs.patch
           filterdiff -i 'a/fs/proc/base.c' -i 'b/fs/proc/base.c' $PATCH_FILE > base_c_only.patch
           
-          # Strictly apply the main patch
+          # Apply patches and allow base.c to fail gracefully
           patch -p1 --no-backup-if-mismatch < main_susfs.patch
-          
-          # Loosely apply the base.c patch. This applies the successful hunks and generates a .rej for the failing one
           patch -p1 --no-backup-if-mismatch < base_c_only.patch || true
           
-          # Auto-heal: Python reads the reject file and injects the missing hooks safely
+          # Python auto-healer parses the reject and injects the code properly
           python3 -c '
           import os
           rej_file = "fs/proc/base.c.rej"
@@ -91,13 +89,12 @@ jobs:
           EOF
           
           cd ..
-          # Fixed Bazel target to define the specific Shiba SOC variables
-          tools/bazel run //private/devices/google/shusky:shiba_dist --config=fast
+          # Fixed target and added the critical --config=shusky flag to define SOC variables
+          tools/bazel run --config=fast --config=shusky //private/devices/google/shusky:zuma_shusky_dist
 
       - name: Validate and Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: Shiba-Lineage23-Boot
-          # Uses a wildcard to guarantee it finds the output directory (shiba or shusky)
           path: kernel_workspace/out/**/dist/
           if-no-files-found: error
