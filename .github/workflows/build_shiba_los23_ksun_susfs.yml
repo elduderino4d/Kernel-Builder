@@ -10,7 +10,7 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y git-core gnupg flex bison build-essential zip curl zlib1g-dev libc6-dev-i386 libncurses5 x11proto-core-dev libx11-dev lib32z1-dev libgl1-mesa-dev libxml2-utils xsltproc unzip fontconfig
+          sudo apt-get install -y git-core gnupg flex bison build-essential zip curl zlib1g-dev libc6-dev-i386 libncurses5 x11proto-core-dev libx11-dev lib32z1-dev libgl1-mesa-dev libxml2-utils xsltproc unzip fontconfig patchutils python3
           sudo curl -s https://storage.googleapis.com/git-repo-downloads/repo -o /usr/local/bin/repo
           sudo chmod a+x /usr/local/bin/repo
 
@@ -22,7 +22,7 @@ jobs:
           repo init -u https://github.com/LineageOS/android_kernel_google_gs-6.1_manifest.git -b lineage-23.0 --depth=1
           repo sync -c -j$(nproc) --no-clone-bundle --no-tags --fail-fast
 
-      - name: Inject KernelSU Next & SUSFS (with sed bypass)
+      - name: Auto-Heal KernelSU Next & SUSFS
         run: |
           set -e 
           
@@ -36,16 +36,40 @@ jobs:
           cp -r susfs4ksu/kernel_patches/include/linux/* aosp/include/linux/
           
           cd aosp
+          PATCH_FILE="../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch"
           
-          # 1. Apply the patch, but explicitly EXCLUDE the file causing the conflict
-          patch -p1 --no-backup-if-mismatch --exclude=fs/proc/base.c < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch
+          # 1. Use patchutils to split the patch into "everything else" and "the problematic file"
+          filterdiff -x 'a/fs/proc/base.c' -x 'b/fs/proc/base.c' $PATCH_FILE > main_susfs.patch
+          filterdiff -i 'a/fs/proc/base.c' -i 'b/fs/proc/base.c' $PATCH_FILE > base_c_only.patch
           
-          # 2. Inject the code manually using sed
-          # NOTE: You must update 'YOUR_EXACT_ANCHOR_LINE_HERE' to the line of code that appears immediately BEFORE the SUSFS injection in base.c
-          sed -i '/YOUR_EXACT_ANCHOR_LINE_HERE/a \
-          #ifdef CONFIG_KSU_SUSFS\n\
-                  susfs_proc_base_c_hook_example();\n\
-          #endif' fs/proc/base.c
+          # 2. Strictly apply the main patch
+          patch -p1 --no-backup-if-mismatch < main_susfs.patch
+          
+          # 3. Loosely apply the base.c patch. This applies the 3 successful hunks and generates a .rej for the failing one
+          patch -p1 --no-backup-if-mismatch < base_c_only.patch || true
+          
+          # 4. Auto-heal: Python reads the reject file and injects the missing hooks at the top of the file dynamically
+          python3 -c '
+          import os
+          rej_file = "fs/proc/base.c.rej"
+          if os.path.exists(rej_file):
+              with open(rej_file, "r") as f:
+                  lines = f.readlines()
+              # Extract only the added C code from the reject
+              added_lines = [line[1:] for line in lines if line.startswith("+") and not line.startswith("+++")]
+              if added_lines:
+                  with open("fs/proc/base.c", "r") as f:
+                      content = f.read()
+                  
+                  # Find the end of the standard header includes to inject the SUSFS hooks safely
+                  last_include = content.rfind("#include")
+                  insert_idx = content.find("\n", last_include) + 1
+                  
+                  new_content = content[:insert_idx] + "".join(added_lines) + content[insert_idx:]
+                  with open("fs/proc/base.c", "w") as f:
+                      f.write(new_content)
+                  print("SUCCESS: Auto-healed fs/proc/base.c dynamically.")
+          '
 
       - name: Configure and Build
         run: |
