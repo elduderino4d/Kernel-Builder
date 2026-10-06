@@ -39,21 +39,36 @@ jobs:
           git ls-remote --exit-code --heads "$MANIFEST" "$LOS_BRANCH" > /dev/null \
             || { echo "ERROR: $LOS_BRANCH not found in $MANIFEST"; exit 1; }
 
-          # Resolve latest KernelSU release tag
-          git clone -q "$KSU_URL" /tmp/ksu
-          KSU_REF=$(git -C /tmp/ksu describe --tags "$(git -C /tmp/ksu rev-list --tags --max-count=1)")
-          git -C /tmp/ksu checkout -q "$KSU_REF"
-          echo "KSU_REF=$KSU_REF" >> $GITHUB_ENV
-
-          # SUSFS patches must exist and apply to that KernelSU tag
+          # SUSFS patches must exist
           git clone -q "$SUSFS_URL" -b "$SUSFS_BRANCH" /tmp/susfs
           PATCH_KSU=/tmp/susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch
           PATCH_KERNEL=/tmp/susfs/kernel_patches/50_add_susfs_in_${SUSFS_BRANCH}.patch
           for F in "$PATCH_KSU" "$PATCH_KERNEL"; do
             [ -f "$F" ] || { echo "ERROR: missing $F"; ls -R /tmp/susfs/kernel_patches | head -60; exit 1; }
           done
-          (cd /tmp/ksu && patch -p1 --dry-run < "$PATCH_KSU") 2>&1 | tee $LOGS/preflight_ksu_patch.log
-          echo "Preflight OK: KernelSU $KSU_REF, SUSFS $(git -C /tmp/susfs rev-parse HEAD), LineageOS $LOS_BRANCH" | tee $LOGS/preflight.log
+
+          # Find the newest KernelSU release tag that SUSFS's official patch applies to
+          git clone -q --filter=blob:none "$KSU_URL" /tmp/ksu
+          TAGS=$(git -C /tmp/ksu tag --list 'v[0-9]*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 40 || true)
+          echo "Candidate tags: $(echo $TAGS | tr '\n' ' ')" | tee $LOGS/tag_search.log
+          KSU_REF=""
+          KSU_FUZZ=""
+          for FUZZ in 0 2; do
+            for T in $TAGS; do
+              git -C /tmp/ksu checkout -q -f "$T"
+              if (cd /tmp/ksu && patch -p1 --dry-run --fuzz=$FUZZ < "$PATCH_KSU") > /tmp/dry.log 2>&1; then
+                echo "fuzz=$FUZZ tag=$T: APPLIES" | tee -a $LOGS/tag_search.log
+                KSU_REF=$T; KSU_FUZZ=$FUZZ
+                break 2
+              else
+                echo "fuzz=$FUZZ tag=$T: fails ($(grep -c FAILED /tmp/dry.log) failed hunks)" | tee -a $LOGS/tag_search.log
+              fi
+            done
+          done
+          [ -n "$KSU_REF" ] || { echo "ERROR: no KernelSU release tag accepts SUSFS's official patch"; exit 1; }
+          echo "KSU_REF=$KSU_REF" >> $GITHUB_ENV
+          echo "KSU_FUZZ=$KSU_FUZZ" >> $GITHUB_ENV
+          echo "Preflight OK: KernelSU $KSU_REF (fuzz $KSU_FUZZ), SUSFS $(git -C /tmp/susfs rev-parse HEAD), LineageOS $LOS_BRANCH" | tee $LOGS/preflight.log
 
       - name: Sync LineageOS Kernel Source
         run: |
@@ -87,13 +102,13 @@ jobs:
           {
             echo "Kernel: $(grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL) =' aosp/Makefile | awk '{print $3}' | paste -sd.)"
             echo "LineageOS branch: $LOS_BRANCH"
-            echo "KernelSU: $KSU_REF"
+            echo "KernelSU: $KSU_REF (patch fuzz $KSU_FUZZ)"
             echo "SUSFS branch: $SUSFS_BRANCH @ $(git -C $SUSFS rev-parse HEAD)"
             echo "Build date: $(date -u)"
           } | tee $LOGS/build_info.log
 
           # KernelSU-side SUSFS patch
-          (cd aosp/KernelSU && patch -p1 --no-backup-if-mismatch < $SUSFS/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch) 2>&1 | tee $LOGS/patch_ksu.log
+          (cd aosp/KernelSU && patch -p1 --fuzz=$KSU_FUZZ --no-backup-if-mismatch < $SUSFS/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch) 2>&1 | tee $LOGS/patch_ksu.log
 
           # Kernel-side SUSFS sources and patch
           cp -r $SUSFS/kernel_patches/fs/* aosp/fs/
@@ -102,8 +117,7 @@ jobs:
           PATCH=$SUSFS/kernel_patches/50_add_susfs_in_${SUSFS_BRANCH}.patch
           BASE=fs/proc/base.c
 
-          # LineageOS 23 lacks the dma-buf.h include the SUSFS patch uses as context.
-          # Add it only if the patch does not apply cleanly without it, and remove it afterwards.
+          # Add the dma-buf.h context include only if the patch needs it, and remove it afterwards.
           ADDED=0
           if ! patch -p1 --dry-run < $PATCH > $LOGS/patch_dryrun.log 2>&1; then
             echo "Dry run failed, adding dma-buf.h context line and retrying" | tee -a $LOGS/patch_dryrun.log
@@ -140,4 +154,27 @@ jobs:
               echo "CONFIG_${OPT}=y" >> $CONFIG_FILE
               echo "enabled: CONFIG_${OPT}" | tee -a $LOGS/config_check.log
             else
-              echo "not
+              echo "not in tree, skipped: CONFIG_${OPT}" | tee -a $LOGS/config_check.log
+              if [ "$OPT" = "KSU" ] || [ "$OPT" = "KSU_SUSFS" ]; then
+                echo "ERROR: required symbol CONFIG_${OPT} missing"; exit 1
+              fi
+            fi
+          done
+
+          grep -q '^CONFIG_SECCOMP=y' $CONFIG_FILE || echo "CONFIG_SECCOMP=y" >> $CONFIG_FILE
+          grep -E 'CONFIG_(SECCOMP|KPROBES|KSU)' $CONFIG_FILE | tee $LOGS/defconfig_relevant.log
+
+          cd ..
+          tools/bazel run --config=shusky --verbose_failures //private/devices/google/shusky:zuma_shusky_dist 2>&1 | tee $LOGS/bazel_build.log
+
+      - name: Stage Flashable Images
+        id: stage
+        run: |
+          set -eo pipefail
+          DIST=$(find kernel_workspace/out -type d -name dist | head -n1)
+          [ -n "$DIST" ] || { echo "ERROR: no dist directory"; exit 1; }
+          echo "dist=$DIST" >> $GITHUB_OUTPUT
+          find "$DIST" -maxdepth 1 -type f -printf '%f %s bytes\n' | sort | tee $LOGS/dist_contents.log
+
+          mkdir -p $GITHUB_WORKSPACE/flashable_images
+          for IMG in boot.img
