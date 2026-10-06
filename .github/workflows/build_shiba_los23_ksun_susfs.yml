@@ -10,7 +10,7 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y git-core gnupg flex bison build-essential zip curl zlib1g-dev libc6-dev-i386 libncurses5 x11proto-core-dev libx11-dev lib32z1-dev libgl1-mesa-dev libxml2-utils xsltproc unzip fontconfig patchutils
+          sudo apt-get install -y git-core gnupg flex bison build-essential zip curl zlib1g-dev libc6-dev-i386 libncurses5 x11proto-core-dev libx11-dev lib32z1-dev libgl1-mesa-dev libxml2-utils xsltproc unzip fontconfig
           sudo curl -s https://storage.googleapis.com/git-repo-downloads/repo -o /usr/local/bin/repo
           sudo chmod a+x /usr/local/bin/repo
 
@@ -22,7 +22,7 @@ jobs:
           repo init -u https://github.com/LineageOS/android_kernel_google_gs-6.1_manifest.git -b lineage-23.0 --depth=1
           repo sync -c -j$(nproc) --no-clone-bundle --no-tags --fail-fast
 
-      - name: Inject Patches & Extract Diagnostics
+      - name: Inject KernelSU Next & SUSFS
         run: |
           set -e 
           
@@ -35,37 +35,40 @@ jobs:
           cp -r susfs4ksu/kernel_patches/fs/* aosp/fs/
           cp -r susfs4ksu/kernel_patches/include/linux/* aosp/include/linux/
           
+          # Remove the stale dma-buf.h context line from the patch so it matches LineageOS 23 exactly
+          sed -i '/#include <linux\/dma-buf.h>/d' susfs4ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch
+          
           cd aosp
-          PATCH_FILE="../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch"
-          
-          # Isolate the failing file
-          filterdiff -x 'a/fs/proc/base.c' -x 'b/fs/proc/base.c' $PATCH_FILE > main_susfs.patch
-          filterdiff -i 'a/fs/proc/base.c' -i 'b/fs/proc/base.c' $PATCH_FILE > base_c_only.patch
-          
-          # Strictly apply the safe patches
-          patch -p1 --no-backup-if-mismatch < main_susfs.patch
-          
-          # Allow base.c to fail gracefully so we can capture the specific error log
-          patch -p1 --no-backup-if-mismatch < base_c_only.patch || true
-          
-          if [ -f "fs/proc/base.c.rej" ]; then
-            echo "=================================================="
-            echo "         SUSFS PATCH REJECTION DETECTED           "
-            echo "=================================================="
-            cat fs/proc/base.c.rej
-            echo "=================================================="
-            echo "STOPPING BUILD: To guarantee kernel stability, we will not guess where this code belongs."
-            
-            # Export logs to the root workspace so GitHub Actions can upload them
-            mkdir -p $GITHUB_WORKSPACE/error_logs
-            cp fs/proc/base.c.rej $GITHUB_WORKSPACE/error_logs/
-            cp fs/proc/base.c $GITHUB_WORKSPACE/error_logs/
-            exit 1
-          fi
+          # Apply patch cleanly with strict validation
+          patch -p1 --no-backup-if-mismatch < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch
 
-      - name: Upload Diagnostic Artifacts
-        if: failure()
+      - name: Configure and Build
+        run: |
+          set -e
+          cd kernel_workspace/aosp
+          
+          CONFIG_FILE="arch/arm64/configs/gki_defconfig"
+          
+          cat <<EOF >> $CONFIG_FILE
+          CONFIG_KSU=y
+          CONFIG_KSU_SUSFS=y
+          CONFIG_KSU_SUSFS_SUS_PATH=y
+          CONFIG_KSU_SUSFS_SUS_MOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_TRY_EMPTY_DIR=y
+          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+          CONFIG_KSU_SUSFS_ENABLE_ALGO=y
+          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+          CONFIG_KSU_SUSFS_SUS_SU=y
+          EOF
+          
+          cd ..
+          tools/bazel run --config=fast --config=shusky //private/devices/google/shusky:zuma_shusky_dist
+
+      - name: Validate and Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Patch-Rejection-Logs
-          path: error_logs/
+          name: Shiba-Lineage23-Boot
+          path: kernel_workspace/out/**/dist/
+          if-no-files-found: error
