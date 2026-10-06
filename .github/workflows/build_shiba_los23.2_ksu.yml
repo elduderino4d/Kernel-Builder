@@ -27,39 +27,50 @@ jobs:
           repo init -u https://github.com/LineageOS/android_kernel_google_gs-6.1_manifest.git -b lineage-23.2 --depth=1
           repo sync -c -j$(nproc) --no-clone-bundle --no-tags --fail-fast
 
-      - name: Inject KernelSU
+      - name: Inject KernelSU (Stable Release)
         run: |
           set -e 
           mkdir -p $GITHUB_WORKSPACE/diagnostic_logs
           
           cd kernel_workspace/aosp
-          # Run the official mainline KernelSU setup script for GKI integration
-          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash - 2>&1 | tee $GITHUB_WORKSPACE/diagnostic_logs/ksu_setup.log
+          
+          # Fetch the latest stable KSU tag (e.g., v0.9.5) to match the public Manager app
+          KSU_TAG=$(curl -s https://api.github.com/repos/tiann/KernelSU/releases/latest | grep "tag_name" | cut -d '"' -f 4)
+          echo "Injecting KernelSU stable tag: $KSU_TAG"
+          
+          # Run the official setup script locked to the stable tag
+          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s $KSU_TAG 2>&1 | tee $GITHUB_WORKSPACE/diagnostic_logs/ksu_setup.log
 
       - name: Configure and Build (Production)
         run: |
           set -e
           cd kernel_workspace/aosp
           
-          CONFIG_FILE="arch/arm64/configs/gki_defconfig"
-          
-          # Enable KernelSU and the mandatory kprobe hooks for GKI kernels
-          cat <<EOF >> $CONFIG_FILE
-          CONFIG_KPROBES=y
-          CONFIG_KPROBE_EVENTS=y
-          CONFIG_KSU=y
-          EOF
+          # Brute-force inject KSU into every defconfig in the tree to prevent Bazel from ignoring it
+          find . -name "*defconfig" -type f -exec sh -c 'echo -e "\nCONFIG_KPROBES=y\nCONFIG_KPROBE_EVENTS=y\nCONFIG_KSU=y" >> "$1"' _ {} \;
           
           cd ..
           # Full production build (LTO and BTF enabled)
           tools/bazel run --config=shusky --verbose_failures //private/devices/google/shusky:zuma_shusky_dist 2>&1 | tee $GITHUB_WORKSPACE/diagnostic_logs/bazel_build.log
+
+      - name: Verify KernelSU Binary Injection
+        run: |
+          set -e
+          DIST_DIR="kernel_workspace/out/shusky/dist"
+          
+          echo "Scanning boot.img for KernelSU binary strings..."
+          if grep -a -q "KernelSU" "$DIST_DIR/boot.img"; then
+            echo "SUCCESS: KernelSU compiled into the kernel successfully!"
+          else
+            echo "ERROR: KernelSU strings not found in boot.img. The compiler ignored the config."
+            exit 1
+          fi
 
       - name: Stage Flashable Images
         run: |
           mkdir -p $GITHUB_WORKSPACE/flashable_images
           DIST_DIR="kernel_workspace/out/shusky/dist"
           
-          # Isolate the core production images
           cp $DIST_DIR/boot.img $GITHUB_WORKSPACE/flashable_images/ 2>/dev/null || true
           cp $DIST_DIR/init_boot.img $GITHUB_WORKSPACE/flashable_images/ 2>/dev/null || true
           cp $DIST_DIR/vendor_boot.img $GITHUB_WORKSPACE/flashable_images/ 2>/dev/null || true
