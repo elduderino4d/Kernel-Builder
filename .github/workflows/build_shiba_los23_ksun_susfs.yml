@@ -27,7 +27,6 @@ jobs:
           set -e 
           
           cd kernel_workspace/aosp
-          # Updated to the new organizational URL to resolve the 404 exit code 127 error
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -
           
           cd ..
@@ -37,8 +36,8 @@ jobs:
           cp -r susfs4ksu/kernel_patches/include/linux/* aosp/include/linux/
           
           cd aosp
-          patch -p1 --no-backup-if-mismatch < ../susfs4ksu/kernel_patches/50_recipe_for_6.1.patch
-          patch -p1 --no-backup-if-mismatch < ../susfs4ksu/kernel_patches/fs/susfs_defconfig.patch
+          # Updated patch filename to match the simonpunk repository for this branch
+          patch -p1 --no-backup-if-mismatch < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch
 
       - name: Configure and Build
         run: |
