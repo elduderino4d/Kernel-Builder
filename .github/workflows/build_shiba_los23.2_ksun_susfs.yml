@@ -1,4 +1,4 @@
-name: Build LineageOS 23 Shiba Kernel (KSU + SUSFS)
+name: Build LineageOS 23.2 Shiba Kernel (KSU + SUSFS)
 
 on:
   workflow_dispatch:
