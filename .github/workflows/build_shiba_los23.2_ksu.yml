@@ -34,7 +34,7 @@ jobs:
           
           cd kernel_workspace/aosp
           
-          # Fetch the latest stable KSU tag (e.g., v0.9.5) to match the public Manager app
+          # Fetch the latest stable KSU tag to match the public Manager app
           KSU_TAG=$(curl -s https://api.github.com/repos/tiann/KernelSU/releases/latest | grep "tag_name" | cut -d '"' -f 4)
           echo "Injecting KernelSU stable tag: $KSU_TAG"
           
@@ -46,8 +46,8 @@ jobs:
           set -e
           cd kernel_workspace/aosp
           
-          # Brute-force inject KSU into every defconfig in the tree to prevent Bazel from ignoring it
-          find . -name "*defconfig" -type f -exec sh -c 'echo -e "\nCONFIG_KPROBES=y\nCONFIG_KPROBE_EVENTS=y\nCONFIG_KSU=y" >> "$1"' _ {} \;
+          # Use printf for POSIX compliance and target both defconfigs and Kleaf fragments
+          find . -type f \( -name "*defconfig" -o -name "*.fragment" \) -exec sh -c 'printf "\nCONFIG_KPROBES=y\nCONFIG_KPROBE_EVENTS=y\nCONFIG_KSU=y\n" >> "$1"' _ {} \;
           
           cd ..
           # Full production build (LTO and BTF enabled)
@@ -58,11 +58,11 @@ jobs:
           set -e
           DIST_DIR="kernel_workspace/out/shusky/dist"
           
-          echo "Scanning boot.img for KernelSU binary strings..."
-          if grep -a -q "KernelSU" "$DIST_DIR/boot.img"; then
+          echo "Scanning compiled vmlinux for KernelSU binary strings..."
+          if grep -a -q "KernelSU" "$DIST_DIR/vmlinux"; then
             echo "SUCCESS: KernelSU compiled into the kernel successfully!"
           else
-            echo "ERROR: KernelSU strings not found in boot.img. The compiler ignored the config."
+            echo "ERROR: KernelSU strings not found. The compiler ignored the config."
             exit 1
           fi
 
