@@ -25,6 +25,7 @@ jobs:
       - name: Inject KernelSU Next & SUSFS
         run: |
           set -e 
+          mkdir -p $GITHUB_WORKSPACE/diagnostic_logs
           
           cd kernel_workspace/aosp
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -
@@ -38,7 +39,7 @@ jobs:
           cd aosp
           sed -i 's/#include <linux\/cpufreq_times.h>/#include <linux\/cpufreq_times.h>\n#include <linux\/dma-buf.h>/' fs/proc/base.c
           
-          patch -p1 --no-backup-if-mismatch < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch
+          patch -p1 --no-backup-if-mismatch < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch 2>&1 | tee $GITHUB_WORKSPACE/diagnostic_logs/patch_injection.log
           
           sed -i '/#include <linux\/dma-buf.h>/d' fs/proc/base.c
 
@@ -64,16 +65,30 @@ jobs:
           EOF
           
           cd ..
-          tools/bazel run --config=fast --config=shusky //private/devices/google/shusky:zuma_shusky_dist
+          tools/bazel run --config=fast --config=shusky --verbose_failures //private/devices/google/shusky:zuma_shusky_dist 2>&1 | tee $GITHUB_WORKSPACE/diagnostic_logs/bazel_build.log
 
-      - name: Validate and Upload Flashable Images
+      - name: Upload Diagnostic Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Diagnostic-Logs
+          path: diagnostic_logs/
+          if-no-files-found: warn
+
+      - name: Stage and Upload Flashable Images
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/flashable_images
+          
+          # Flatten the directory structure by moving only the compiled images to a clean folder
+          find kernel_workspace/out/ -path "*/dist/boot.img" -exec cp {} $GITHUB_WORKSPACE/flashable_images/ \;
+          find kernel_workspace/out/ -path "*/dist/init_boot.img" -exec cp {} $GITHUB_WORKSPACE/flashable_images/ \;
+          find kernel_workspace/out/ -path "*/dist/vendor_boot.img" -exec cp {} $GITHUB_WORKSPACE/flashable_images/ \;
+          find kernel_workspace/out/ -path "*/dist/vendor_kernel_boot.img" -exec cp {} $GITHUB_WORKSPACE/flashable_images/ \;
+          find kernel_workspace/out/ -path "*/dist/dtbo.img" -exec cp {} $GITHUB_WORKSPACE/flashable_images/ \;
+
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: Shiba-Lineage23-Images
-          path: |
-            kernel_workspace/out/**/dist/boot.img
-            kernel_workspace/out/**/dist/init_boot.img
-            kernel_workspace/out/**/dist/vendor_boot.img
-            kernel_workspace/out/**/dist/vendor_kernel_boot.img
-            kernel_workspace/out/**/dist/dtbo.img
+          path: flashable_images/
           if-no-files-found: error
