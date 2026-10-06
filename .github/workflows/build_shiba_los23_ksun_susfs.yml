@@ -38,30 +38,28 @@ jobs:
           cd aosp
           PATCH_FILE="../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch"
           
-          # 1. Use patchutils to split the patch into "everything else" and "the problematic file"
+          # Use patchutils to split the patch into "everything else" and "the problematic file"
           filterdiff -x 'a/fs/proc/base.c' -x 'b/fs/proc/base.c' $PATCH_FILE > main_susfs.patch
           filterdiff -i 'a/fs/proc/base.c' -i 'b/fs/proc/base.c' $PATCH_FILE > base_c_only.patch
           
-          # 2. Strictly apply the main patch
+          # Strictly apply the main patch
           patch -p1 --no-backup-if-mismatch < main_susfs.patch
           
-          # 3. Loosely apply the base.c patch. This applies the 3 successful hunks and generates a .rej for the failing one
+          # Loosely apply the base.c patch. This applies the successful hunks and generates a .rej for the failing one
           patch -p1 --no-backup-if-mismatch < base_c_only.patch || true
           
-          # 4. Auto-heal: Python reads the reject file and injects the missing hooks at the top of the file dynamically
+          # Auto-heal: Python reads the reject file and injects the missing hooks safely
           python3 -c '
           import os
           rej_file = "fs/proc/base.c.rej"
           if os.path.exists(rej_file):
               with open(rej_file, "r") as f:
                   lines = f.readlines()
-              # Extract only the added C code from the reject
               added_lines = [line[1:] for line in lines if line.startswith("+") and not line.startswith("+++")]
               if added_lines:
                   with open("fs/proc/base.c", "r") as f:
                       content = f.read()
                   
-                  # Find the end of the standard header includes to inject the SUSFS hooks safely
                   last_include = content.rfind("#include")
                   insert_idx = content.find("\n", last_include) + 1
                   
@@ -93,7 +91,8 @@ jobs:
           EOF
           
           cd ..
-          tools/bazel run //private/gs-google:shiba_dist --config=fast
+          # Fixed Bazel target path for Tensor G3 (Pixel 8) on 6.1 kernel base
+          tools/bazel run //private/google-modules/soc/gs:shiba_dist --config=fast
 
       - name: Validate and Upload Artifacts
         uses: actions/upload-artifact@v4
