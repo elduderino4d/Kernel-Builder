@@ -91,13 +91,13 @@ jobs:
           EOF
           
           cd ..
-          # Fixed Bazel target using the grouped 'shusky' directory and 'zuma' SoC combination
-          tools/bazel run //private/devices/google/shusky:zuma_shusky_dist --config=fast
+          # Fixed Bazel target to define the specific Shiba SOC variables
+          tools/bazel run //private/devices/google/shusky:shiba_dist --config=fast
 
       - name: Validate and Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: Shiba-Lineage23-Boot
-          # The output directory has been updated to reflect the shusky build target
-          path: kernel_workspace/out/shusky/dist/
+          # Uses a wildcard to guarantee it finds the output directory (shiba or shusky)
+          path: kernel_workspace/out/**/dist/
           if-no-files-found: error
