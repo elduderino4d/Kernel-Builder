@@ -22,7 +22,7 @@ jobs:
           repo init -u https://github.com/LineageOS/android_kernel_google_gs-6.1_manifest.git -b lineage-23.0 --depth=1
           repo sync -c -j$(nproc) --no-clone-bundle --no-tags --fail-fast
 
-      - name: Inject KernelSU Next & SUSFS
+      - name: Inject KernelSU Next & SUSFS (with sed bypass)
         run: |
           set -e 
           
@@ -36,8 +36,16 @@ jobs:
           cp -r susfs4ksu/kernel_patches/include/linux/* aosp/include/linux/
           
           cd aosp
-          # Updated patch filename to match the simonpunk repository for this branch
-          patch -p1 --no-backup-if-mismatch < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch
+          
+          # 1. Apply the patch, but explicitly EXCLUDE the file causing the conflict
+          patch -p1 --no-backup-if-mismatch --exclude=fs/proc/base.c < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch
+          
+          # 2. Inject the code manually using sed
+          # NOTE: You must update 'YOUR_EXACT_ANCHOR_LINE_HERE' to the line of code that appears immediately BEFORE the SUSFS injection in base.c
+          sed -i '/YOUR_EXACT_ANCHOR_LINE_HERE/a \
+          #ifdef CONFIG_KSU_SUSFS\n\
+                  susfs_proc_base_c_hook_example();\n\
+          #endif' fs/proc/base.c
 
       - name: Configure and Build
         run: |
