@@ -35,12 +35,16 @@ jobs:
           cp -r susfs4ksu/kernel_patches/fs/* aosp/fs/
           cp -r susfs4ksu/kernel_patches/include/linux/* aosp/include/linux/
           
-          # Remove the stale dma-buf.h context line from the patch so it matches LineageOS 23 exactly
-          sed -i '/#include <linux\/dma-buf.h>/d' susfs4ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch
-          
           cd aosp
-          # Apply patch cleanly with strict validation
+          
+          # 1. Temporarily add the missing header to base.c so the patch tool can find its anchor
+          sed -i 's/#include <linux\/cpufreq_times.h>/#include <linux\/cpufreq_times.h>\n#include <linux\/dma-buf.h>/' fs/proc/base.c
+          
+          # 2. Apply the patch cleanly (it will now succeed on all files)
           patch -p1 --no-backup-if-mismatch < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch
+          
+          # 3. Remove the injected header to maintain source purity
+          sed -i '/#include <linux\/dma-buf.h>/d' fs/proc/base.c
 
       - name: Configure and Build
         run: |
