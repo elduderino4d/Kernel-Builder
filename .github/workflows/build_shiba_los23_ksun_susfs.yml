@@ -10,7 +10,7 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y git-core gnupg flex bison build-essential zip curl zlib1g-dev libc6-dev-i386 libncurses5 x11proto-core-dev libx11-dev lib32z1-dev libgl1-mesa-dev libxml2-utils xsltproc unzip fontconfig patchutils python3
+          sudo apt-get install -y git-core gnupg flex bison build-essential zip curl zlib1g-dev libc6-dev-i386 libncurses5 x11proto-core-dev libx11-dev lib32z1-dev libgl1-mesa-dev libxml2-utils xsltproc unzip fontconfig patchutils
           sudo curl -s https://storage.googleapis.com/git-repo-downloads/repo -o /usr/local/bin/repo
           sudo chmod a+x /usr/local/bin/repo
 
@@ -22,7 +22,7 @@ jobs:
           repo init -u https://github.com/LineageOS/android_kernel_google_gs-6.1_manifest.git -b lineage-23.0 --depth=1
           repo sync -c -j$(nproc) --no-clone-bundle --no-tags --fail-fast
 
-      - name: Auto-Heal KernelSU Next & SUSFS
+      - name: Inject Patches & Extract Diagnostics
         run: |
           set -e 
           
@@ -38,63 +38,34 @@ jobs:
           cd aosp
           PATCH_FILE="../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch"
           
-          # Split the patch and isolate the conflicting file
+          # Isolate the failing file
           filterdiff -x 'a/fs/proc/base.c' -x 'b/fs/proc/base.c' $PATCH_FILE > main_susfs.patch
           filterdiff -i 'a/fs/proc/base.c' -i 'b/fs/proc/base.c' $PATCH_FILE > base_c_only.patch
           
-          # Apply patches and allow base.c to fail gracefully
+          # Strictly apply the safe patches
           patch -p1 --no-backup-if-mismatch < main_susfs.patch
+          
+          # Allow base.c to fail gracefully so we can capture the specific error log
           patch -p1 --no-backup-if-mismatch < base_c_only.patch || true
           
-          # Python auto-healer parses the reject and injects the code properly
-          python3 -c '
-          import os
-          rej_file = "fs/proc/base.c.rej"
-          if os.path.exists(rej_file):
-              with open(rej_file, "r") as f:
-                  lines = f.readlines()
-              added_lines = [line[1:] for line in lines if line.startswith("+") and not line.startswith("+++")]
-              if added_lines:
-                  with open("fs/proc/base.c", "r") as f:
-                      content = f.read()
-                  
-                  last_include = content.rfind("#include")
-                  insert_idx = content.find("\n", last_include) + 1
-                  
-                  new_content = content[:insert_idx] + "".join(added_lines) + content[insert_idx:]
-                  with open("fs/proc/base.c", "w") as f:
-                      f.write(new_content)
-                  print("SUCCESS: Auto-healed fs/proc/base.c dynamically.")
-          '
+          if [ -f "fs/proc/base.c.rej" ]; then
+            echo "=================================================="
+            echo "         SUSFS PATCH REJECTION DETECTED           "
+            echo "=================================================="
+            cat fs/proc/base.c.rej
+            echo "=================================================="
+            echo "STOPPING BUILD: To guarantee kernel stability, we will not guess where this code belongs."
+            
+            # Export logs to the root workspace so GitHub Actions can upload them
+            mkdir -p $GITHUB_WORKSPACE/error_logs
+            cp fs/proc/base.c.rej $GITHUB_WORKSPACE/error_logs/
+            cp fs/proc/base.c $GITHUB_WORKSPACE/error_logs/
+            exit 1
+          fi
 
-      - name: Configure and Build
-        run: |
-          set -e
-          cd kernel_workspace/aosp
-          
-          CONFIG_FILE="arch/arm64/configs/gki_defconfig"
-          
-          cat <<EOF >> $CONFIG_FILE
-          CONFIG_KSU=y
-          CONFIG_KSU_SUSFS=y
-          CONFIG_KSU_SUSFS_SUS_PATH=y
-          CONFIG_KSU_SUSFS_SUS_MOUNT=y
-          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
-          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
-          CONFIG_KSU_SUSFS_AUTO_ADD_TRY_EMPTY_DIR=y
-          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
-          CONFIG_KSU_SUSFS_ENABLE_ALGO=y
-          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
-          CONFIG_KSU_SUSFS_SUS_SU=y
-          EOF
-          
-          cd ..
-          # Fixed target and added the critical --config=shusky flag to define SOC variables
-          tools/bazel run --config=fast --config=shusky //private/devices/google/shusky:zuma_shusky_dist
-
-      - name: Validate and Upload Artifacts
+      - name: Upload Diagnostic Artifacts
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: Shiba-Lineage23-Boot
-          path: kernel_workspace/out/**/dist/
-          if-no-files-found: error
+          name: Patch-Rejection-Logs
+          path: error_logs/
