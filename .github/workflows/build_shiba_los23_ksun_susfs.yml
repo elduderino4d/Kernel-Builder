@@ -25,6 +25,7 @@ jobs:
       - name: Inject KernelSU Next & SUSFS
         run: |
           set -e 
+          mkdir -p $GITHUB_WORKSPACE/diagnostic_logs
           
           cd kernel_workspace/aosp
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -
@@ -40,8 +41,8 @@ jobs:
           # 1. Temporarily add the missing header to base.c so the patch tool can find its anchor
           sed -i 's/#include <linux\/cpufreq_times.h>/#include <linux\/cpufreq_times.h>\n#include <linux\/dma-buf.h>/' fs/proc/base.c
           
-          # 2. Apply the patch cleanly (it will now succeed on all files)
-          patch -p1 --no-backup-if-mismatch < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch
+          # 2. Apply the patch cleanly and save verbose output to a log file
+          patch -p1 --no-backup-if-mismatch < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch 2>&1 | tee $GITHUB_WORKSPACE/diagnostic_logs/patch_injection.log
           
           # 3. Remove the injected header to maintain source purity
           sed -i '/#include <linux\/dma-buf.h>/d' fs/proc/base.c
@@ -68,7 +69,16 @@ jobs:
           EOF
           
           cd ..
-          tools/bazel run --config=fast --config=shusky //private/devices/google/shusky:zuma_shusky_dist
+          # Build with verbose failures enabled and save output to a log file
+          tools/bazel run --config=fast --config=shusky --verbose_failures //private/devices/google/shusky:zuma_shusky_dist 2>&1 | tee $GITHUB_WORKSPACE/diagnostic_logs/bazel_build.log
+
+      - name: Upload Diagnostic Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Diagnostic-Logs
+          path: diagnostic_logs/
+          if-no-files-found: warn
 
       - name: Validate and Upload Artifacts
         uses: actions/upload-artifact@v4
