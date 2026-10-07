@@ -134,7 +134,7 @@ jobs:
 
       - name: Integrate KernelSU-Next and SUSFS
         run: |
-          echo "WORKFLOW ksunext-susfs-v4 run ${{ github.run_number }}"
+          echo "WORKFLOW ksunext-susfs-v5 run ${{ github.run_number }}"
           cd "${{ env.KERNEL_DIR }}"
 
           KSU_REPO=https://github.com/pershoot/KernelSU-Next
@@ -146,10 +146,39 @@ jobs:
           fi
           rm -rf KernelSU-Next drivers/kernelsu
           git clone --single-branch -b "$KSU_BRANCH" "$KSU_REPO" KernelSU-Next
+          KSU_COUNT=$(git -C KernelSU-Next rev-list --count HEAD)
+          KSU_TAG=$(git -C KernelSU-Next describe --tags --abbrev=0 2>/dev/null || echo v0.0.1)
           echo "KernelSU-Next commit: $(git -C KernelSU-Next rev-parse --short HEAD)"
-          echo "KernelSU-Next tag: $(git -C KernelSU-Next describe --tags 2>/dev/null || echo none)"
-          echo "KernelSU-Next commit count: $(git -C KernelSU-Next rev-list --count HEAD)"
-          cp -r KernelSU-Next/kernel drivers/kernelsu
+          echo "KernelSU-Next tag: $KSU_TAG"
+          echo "KernelSU-Next commit count: $KSU_COUNT"
+          echo "Repo kernel dir:"
+          ls -la KernelSU-Next/kernel | head -n 40
+          echo "app_profile.h locations:"
+          find KernelSU-Next -name 'app_profile.h'
+
+          cp -rL KernelSU-Next/kernel drivers/kernelsu
+          if [ ! -f drivers/kernelsu/uapi/app_profile.h ]; then
+            F=$(find KernelSU-Next -name 'app_profile.h' | head -n 1)
+            if [ -z "$F" ]; then
+              echo "::error::app_profile.h not found anywhere in KernelSU-Next"
+              exit 1
+            fi
+            echo "Copying $(dirname "$F") to drivers/kernelsu/uapi"
+            mkdir -p drivers/kernelsu/uapi
+            cp -rL "$(dirname "$F")"/. drivers/kernelsu/uapi/
+          fi
+          ls drivers/kernelsu/uapi
+
+          KB=drivers/kernelsu/Kbuild
+          [ -f "$KB" ] || KB=drivers/kernelsu/Makefile
+          {
+            echo "override KSU_GIT_VERSION := ${KSU_COUNT}"
+            echo "override KSU_VERSION_TAG := ${KSU_TAG}"
+            cat "$KB"
+          } > "$KB.new"
+          mv "$KB.new" "$KB"
+          echo "Version lines in $KB:"
+          grep -n "KSU_GIT_VERSION\|KSU_VERSION_TAG" "$KB" | head -n 30
           rm -rf KernelSU-Next
 
           grep -q "kernelsu" drivers/Makefile || printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
@@ -165,8 +194,6 @@ jobs:
           echo "KernelSU Kconfig (KSU and SUSFS entries):"
           sed -n '/^config KSU$/,/^config KSU_DEBUG/p' drivers/kernelsu/Kconfig | head -n 40
           grep -n -A8 -E '^config KSU_SUSFS$' drivers/kernelsu/Kconfig | head -n 30 || true
-          echo "KernelSU version logic:"
-          grep -n "VERSION" drivers/kernelsu/Makefile | head -n 20 || true
 
           K_VER=$(grep -E '^VERSION =' Makefile | awk '{print $3}')
           K_PATCH=$(grep -E '^PATCHLEVEL =' Makefile | awk '{print $3}')
@@ -239,7 +266,7 @@ jobs:
             exit 1
           fi
           {
-            echo "WORKFLOW ksunext-susfs-v4 run ${{ github.run_number }}"
+            echo "WORKFLOW ksunext-susfs-v5 run ${{ github.run_number }}"
             echo "LINEAGE_BRANCH=${{ env.lineage_branch }}"
             echo "TARGET=$TARGET"
             echo "-----"
@@ -250,6 +277,7 @@ jobs:
           RC=$?
           set -e
           tail -n 60 ../build.log
+          grep -n "KernelSU-Next version\|KernelSU-Next tag\|SUSFS_VERSION" ../build.log || true
           if [ $RC -ne 0 ]; then
             echo "=========== BUILD FAILED (exit $RC) ==========="
             echo "----- first ERROR lines -----"
