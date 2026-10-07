@@ -1,4 +1,4 @@
-name: Build LineageOS Boot Image (Pixel 8) with Standalone SuSFS
+name: Build LineageOS 23.2 Boot Image (Pixel 8) with Standalone SuSFS
 
 on:
   workflow_dispatch:
@@ -7,7 +7,7 @@ on:
 
 jobs:
   build-boot-image:
-    name: Build Pixel 8 Standalone SuSFS boot.img
+    name: Build Pixel 8 LineageOS 23.2 SuSFS boot.img
     runs-on: ubuntu-22.04
 
     steps:
@@ -28,21 +28,26 @@ jobs:
           chmod a+x ~/bin/repo
           echo "$HOME/bin" >> $GITHUB_PATH
 
-      - name: Detect Latest LineageOS Manifest Branch
-        id: detect
+      - name: Set LineageOS 23.2 Branch
         run: |
-          DETECTED_BRANCH=$(git ls-remote --heads https://github.com/LineageOS/android_kernel_google_gs-6.1_manifest.git | grep 'refs/heads/lineage-' | awk -F/ '{print $3}' | sort -V | tail -n 1)
-          if [ -z "$DETECTED_BRANCH" ]; then
-            DETECTED_BRANCH="lineage-22.1"
+          # Targeting explicit LineageOS 23.2 release branch
+          TARGET_BRANCH="lineage-23.2"
+          
+          # Fallback check in case the remote branch name is structured differently
+          REMOTE_CHECK=$(git ls-remote --heads https://github.com/LineageOS/android_kernel_google_gs-6.1_manifest.git refs/heads/$TARGET_BRANCH)
+          if [ -z "$REMOTE_CHECK" ]; then
+            TARGET_BRANCH=$(git ls-remote --heads https://github.com/LineageOS/android_kernel_google_gs-6.1_manifest.git | grep 'lineage-23' | awk -F/ '{print $3}' | sort -V | tail -n 1)
           fi
-          echo "LineageOS Branch: $DETECTED_BRANCH"
-          echo "lineage_branch=$DETECTED_BRANCH" >> $GITHUB_ENV
+          
+          echo "LineageOS Branch: $TARGET_BRANCH"
+          echo "lineage_branch=$TARGET_BRANCH" >> $GITHUB_ENV
 
       - name: Sync LineageOS Kernel Tree
         run: |
           mkdir -p android-kernel && cd android-kernel
           repo init -u https://github.com/LineageOS/android_kernel_google_gs-6.1_manifest.git -b ${{ env.lineage_branch }} --depth=1
           repo sync -c -j$(nproc --all) --no-tags --no-clone-bundle
+          
           if [ -d "common" ]; then
             echo "KERNEL_DIR=$PWD/common" >> $GITHUB_ENV
           elif [ -d "private/gs-google" ]; then
@@ -55,25 +60,30 @@ jobs:
         run: |
           cd ${{ env.KERNEL_DIR }}
 
+          # 1. Clone SuSFS repo
           git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git ../susfs4ksu
 
-          cp ../susfs4ksu/kernel_patches/fs/susfs.c fs/
-          cp ../susfs4ksu/kernel_patches/include/linux/susfs.h include/linux/
+          # 2. Copy C source and header files explicitly to avoid file-vs-directory errors
+          cp ../susfs4ksu/kernel_patches/fs/susfs.c fs/susfs.c
+          cp ../susfs4ksu/kernel_patches/include/linux/susfs.h include/linux/susfs.h
 
+          # 3. Read GKI kernel version from Makefile (e.g., 6.1)
           K_VER=$(grep -E '^VERSION =' Makefile | awk '{print $3}')
           K_PATCH=$(grep -E '^PATCHLEVEL =' Makefile | awk '{print $3}')
           GKI_VERSION="${K_VER}.${K_PATCH}"
           echo "Detected Kernel GKI Version: $GKI_VERSION"
 
+          # 4. Find matching 50_add_susfs patch
           MATCHED_PATCH=$(find ../susfs4ksu/kernel_patches/ -name "*gki*${GKI_VERSION}*.patch" | sort -V | tail -n 1)
           if [ -z "$MATCHED_PATCH" ]; then
-            echo "No exact match for ${GKI_VERSION}, selecting latest GKI patch..."
+            echo "No exact match for ${GKI_VERSION}, selecting latest available GKI patch..."
             MATCHED_PATCH=$(ls ../susfs4ksu/kernel_patches/50_add_susfs_in_kernel-gki-*.patch | sort -V | tail -n 1)
           fi
 
           echo "Applying SuSFS patch: $MATCHED_PATCH"
           patch -p1 < "$MATCHED_PATCH"
 
+          # 5. Inject standalone SuSFS configs into defconfig files
           for cfg in arch/arm64/configs/gki_defconfig arch/arm64/configs/shiba_defconfig; do
             if [ -f "$cfg" ]; then
               echo "Injecting SuSFS configs into $cfg"
@@ -89,12 +99,13 @@ jobs:
         run: |
           cd android-kernel
           LTO=thin BUILD_BOOT_IMG=1 build/build.sh || LTO=thin BUILD_CONFIG=common/build.config.gki.aarch64 BUILD_BOOT_IMG=1 build/build.sh
+          
           mkdir -p ../dist_output
           find out -type f -name "boot.img" -exec cp {} ../dist_output/boot.img \;
 
       - name: Upload Raw boot.img
         uses: actions/upload-artifact@v4
         with:
-          name: boot-shiba-susfs.img
+          name: boot-shiba-los23.2-susfs.img
           path: dist_output/boot.img
           if-no-files-found: error
