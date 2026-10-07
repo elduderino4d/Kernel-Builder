@@ -92,15 +92,36 @@ jobs:
         run: |
           cd android-kernel
           ls
-          mkdir -p ../dist_output
-          if [ -x build/build.sh ]; then
-            LTO=thin BUILD_BOOT_IMG=1 build/build.sh
-          else
-            tools/bazel run --lto=thin --config=stamp //aosp:kernel_aarch64_dist -- --destdir="$PWD/out/dist" \
-              || tools/bazel run --lto=thin --config=stamp //common:kernel_aarch64_dist -- --destdir="$PWD/out/dist"
+          mkdir -p ../dist_output out/dist
+          set +e
+          tools/bazel run --lto=thin --config=stamp //aosp:kernel_aarch64_dist -- --destdir="$PWD/out/dist" > ../build.log 2>&1
+          RC=$?
+          set -e
+          tail -n 60 ../build.log
+          if [ $RC -ne 0 ]; then
+            echo "=========== BUILD FAILED (exit $RC) ==========="
+            echo "----- first ERROR lines -----"
+            grep -n -m 40 -E "ERROR|error:|fatal|FAILED" ../build.log || true
+            echo "----- available dist targets -----"
+            tools/bazel query 'kind("copy_to_dist_dir", //...)' --keep_going 2>/dev/null || true
+            exit 1
           fi
           find out -type f -name "boot*.img"
-          cp "$(find out -type f -name boot.img | head -n 1)" ../dist_output/boot.img
+          BOOT=$(find out -type f -name boot.img | head -n 1)
+          if [ -z "$BOOT" ]; then
+            echo "::error::boot.img not found in output"
+            find out -type f | head -n 50
+            exit 1
+          fi
+          cp "$BOOT" ../dist_output/boot.img
+
+      - name: Upload Build Log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
 
       - name: Upload Raw boot.img
         uses: actions/upload-artifact@v4
