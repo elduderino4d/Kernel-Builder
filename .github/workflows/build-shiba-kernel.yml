@@ -28,13 +28,12 @@ jobs:
           chmod a+x ~/bin/repo
           echo "$HOME/bin" >> $GITHUB_PATH
 
-      - name: Detect Latest LineageOS Branch
+      - name: Detect Latest LineageOS Manifest Branch
         id: detect
         run: |
-          # Query latest lineage branch for Google GS 6.1 Kernel Manifest
+          # Query latest branch from the actual LineageOS GS-6.1 kernel manifest repo
           DETECTED_BRANCH=$(git ls-remote --heads https://github.com/LineageOS/android_kernel_google_gs-6.1_manifest.git | grep 'refs/heads/lineage-' | awk -F/ '{print $3}' | sort -V | tail -n 1)
           
-          # Fallback if git ls-remote returns empty string
           if [ -z "$DETECTED_BRANCH" ]; then
             DETECTED_BRANCH="lineage-22.1"
           fi
@@ -42,41 +41,42 @@ jobs:
           echo "LineageOS Branch: $DETECTED_BRANCH"
           echo "lineage_branch=$DETECTED_BRANCH" >> $GITHUB_ENV
 
-      - name: Sync LineageOS GKI Kernel Workspace
+      - name: Sync LineageOS Kernel Tree
         run: |
           mkdir -p android-kernel && cd android-kernel
           
-          # Initialize GKI Manifest workspace via repo tool
+          # Initialize workspace using Lineage's GS-6.1 manifest
           repo init -u https://github.com/LineageOS/android_kernel_google_gs-6.1_manifest.git -b ${{ env.lineage_branch }} --depth=1
           repo sync -c -j$(nproc --all) --no-tags --no-clone-bundle
           
-          # Set location of core common GKI kernel source
+          # Path where the common Linux kernel GKI resides
           if [ -d "common" ]; then
             echo "KERNEL_DIR=$PWD/common" >> $GITHUB_ENV
-          else
+          elif [ -d "private/gs-google" ]; then
             echo "KERNEL_DIR=$PWD/private/gs-google" >> $GITHUB_ENV
+          else
+            echo "KERNEL_DIR=$PWD" >> $GITHUB_ENV
           fi
 
       - name: Patch Standalone SuSFS into Kernel
         run: |
           cd ${{ env.KERNEL_DIR }}
 
-          # Fetch SuSFS repository cleanly
+          # Fetch SuSFS
           git clone https://gitlab.com/simonpunk/susfs4ksu.git ../susfs4ksu
           cd ../susfs4ksu
           
-          # Checkout latest tag if available, otherwise stay on default branch
           LATEST_TAG=$(git tag -l | sort -V | tail -n 1)
           if [ -n "$LATEST_TAG" ]; then
             git checkout "$LATEST_TAG"
           fi
           cd ${{ env.KERNEL_DIR }}
 
-          # Copy core SuSFS files and headers into kernel tree
+          # Copy core SuSFS C files and header interfaces directly into kernel tree
           cp -r ../susfs4ksu/kernel_patches/fs/* fs/ 2>/dev/null || cp -r ../susfs4ksu/fs/* fs/
           cp -r ../susfs4ksu/kernel_patches/include/linux/* include/linux/ 2>/dev/null || cp -r ../susfs4ksu/include/linux/* include/linux/
 
-          # Detect and apply matching GKI kernel patch (e.g. android14-6.1 / android15-6.6)
+          # Detect and apply matching GKI kernel patch
           MATCHED_PATCH=$(find ../susfs4ksu/ -name "50_add_susfs_in_kernel-gki-*.patch" | sort -V | tail -n 1)
           if [ -n "$MATCHED_PATCH" ]; then
             echo "Applying GKI kernel patch: $MATCHED_PATCH"
@@ -98,11 +98,11 @@ jobs:
       - name: Build boot.img
         run: |
           cd android-kernel
-          
+
           # Execute Kleaf build target for Pixel 8 (Tensor G3) boot.img
           LTO=thin BUILD_BOOT_IMG=1 build/build.sh || LTO=thin BUILD_CONFIG=common/build.config.gki.aarch64 BUILD_BOOT_IMG=1 build/build.sh
 
-          # Stage output boot image
+          # Stage final boot image output
           mkdir -p ../dist_output
           find out -type f -name "boot.img" -exec cp {} ../dist_output/boot.img \;
 
