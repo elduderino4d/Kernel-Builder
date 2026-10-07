@@ -39,18 +39,18 @@ jobs:
           repo init -u https://github.com/LineageOS/android_kernel_google_gs-6.1_manifest.git -b lineage-23.2
           repo sync -c -j$(nproc --all)
 
-      - name: Integrate tiann's KernelSU (Latest Stable)
+      - name: Integrate tiann's KernelSU (v3.3.0)
         run: |
           cd kernel_workspace/private/google-modules/soc/gs
-          # Fetch the absolute latest stable release tag of KernelSU via GitHub API
-          # This guarantees the static SUSFS patches apply cleanly
-          KSU_VERSION=$(curl -s https://api.github.com/repos/tiann/KernelSU/releases/latest | jq -r .tag_name)
-          echo "Fetching Latest KernelSU Stable Release: $KSU_VERSION"
+          # Explicitly fetch Tiann's v3.3.0 release to prevent 'main' branch patch breaks
+          KSU_VERSION="v3.3.0"
+          echo "Fetching KernelSU Release: $KSU_VERSION"
           curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s "$KSU_VERSION"
 
-      - name: Fetch and Apply simonpunk's SUSFS v2.3+
+      - name: Fetch and Apply simonpunk's SUSFS
         run: |
           cd kernel_workspace/private/google-modules/soc/gs
+          # Use Simonpunk's maintained GKI Android 14 branch, which natively supports KSU v3.3.0
           git clone --depth=1 -b gki-android14-6.1 https://gitlab.com/simonpunk/susfs4ksu.git ../susfs
           
           # 1. Patch KSU directory with integrated error logging
