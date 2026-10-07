@@ -1,0 +1,176 @@
+name: Build LineageOS Kernel (Pixel 8) with KernelSU-Next
+
+on:
+  workflow_dispatch:
+    inputs:
+      lineage_branch:
+        description: 'LineageOS branch (auto = newest available)'
+        required: false
+        default: 'auto'
+
+jobs:
+  build-boot-image:
+    name: Build Pixel 8 LineageOS KernelSU-Next boot.img
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential ccache curl flex g++-multilib gcc-multilib git gnupg gperf lib32ncurses5-dev lib32readline-dev lib32z1-dev liblz4-tool libncurses5 libncurses5-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 jq
+          mkdir -p ~/bin
+          curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod a+x ~/bin/repo
+          echo "$HOME/bin" >> $GITHUB_PATH
+
+      - name: Sync LineageOS Kernel Tree
+        env:
+          INPUT_BRANCH: ${{ inputs.lineage_branch }}
+        run: |
+          M=https://github.com/LineageOS/android_kernel_google_gs-6.1_manifest.git
+          if [ -n "$INPUT_BRANCH" ] && [ "$INPUT_BRANCH" != "auto" ]; then
+            CANDIDATES="$INPUT_BRANCH"
+          else
+            CANDIDATES=$(git ls-remote --heads $M | awk -F'refs/heads/' '{print $2}' | grep -E '^lineage-[0-9]+(\.[0-9]+)?$' | sort -V -r)
+          fi
+          if [ -z "$CANDIDATES" ]; then
+            echo "::error::No LineageOS branches found on manifest repo"
+            git ls-remote --heads $M | head -n 30
+            exit 1
+          fi
+          echo "Candidate branches (newest first):"
+          echo "$CANDIDATES"
+          mkdir -p android-kernel
+          cd android-kernel
+          OK=""
+          for b in $CANDIDATES; do
+            echo "Trying branch: $b"
+            rm -rf .repo
+            if repo init -u $M -b "$b" --depth=1; then
+              OK="$b"
+              break
+            fi
+          done
+          if [ -z "$OK" ]; then
+            echo "::error::repo init failed for every candidate branch"
+            exit 1
+          fi
+          echo "Using LineageOS branch: $OK"
+          echo "lineage_branch=$OK" >> $GITHUB_ENV
+          repo sync -c -j$(nproc --all) --no-tags --no-clone-bundle
+          KDIR=""
+          while IFS= read -r mk; do
+            d=$(dirname "$mk")
+            if [ -d "$d/fs" ] && [ -d "$d/arch/arm64" ] && [ -d "$d/kernel" ]; then
+              KDIR="$d"
+              break
+            fi
+          done < <(find "$PWD" -maxdepth 4 -name Makefile -not -path '*/out/*' | sort)
+          if [ -z "$KDIR" ]; then
+            echo "::error::Could not locate kernel source tree"
+            ls -la
+            exit 1
+          fi
+          REL="${KDIR#$PWD/}"
+          if [ "$REL" = "$KDIR" ] || [ -z "$REL" ]; then
+            echo "::error::Kernel source is not in a subfolder of the workspace: $KDIR"
+            exit 1
+          fi
+          echo "Kernel source: $KDIR (package: $REL)"
+          echo "KERNEL_DIR=$KDIR" >> $GITHUB_ENV
+          echo "KERNEL_REL=$REL" >> $GITHUB_ENV
+
+      - name: Integrate KernelSU-Next
+        run: |
+          echo "WORKFLOW ksunext-v2 run ${{ github.run_number }}"
+          cd "${{ env.KERNEL_DIR }}"
+          S=https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh
+          curl -LSs "$S" | bash - || curl -LSs "$S" | bash -s next
+          KSUDIR=$(ls -d KernelSU-Next KernelSU 2>/dev/null | head -n 1 || true)
+          echo "KernelSU source dir: $KSUDIR"
+          if [ ! -e drivers/kernelsu ]; then
+            echo "::error::KernelSU-Next setup did not create drivers/kernelsu"
+            ls drivers | head -n 50
+            ls
+            exit 1
+          fi
+          if [ -L drivers/kernelsu ]; then
+            echo "Replacing symlink with a real copy so Bazel can see it"
+            SRC=$(readlink -f drivers/kernelsu)
+            rm drivers/kernelsu
+            cp -r "$SRC" drivers/kernelsu
+          fi
+          ls -la drivers/kernelsu | head -n 20
+          grep -n "kernelsu" drivers/Makefile drivers/Kconfig || true
+          [ -n "$KSUDIR" ] && git -C "$KSUDIR" describe --tags 2>/dev/null || true
+          for cfg in arch/arm64/configs/*_defconfig; do
+            sed -i '/CONFIG_KSU/d' "$cfg"
+          done
+          printf '%s\n' CONFIG_KSU=y >> arch/arm64/configs/gki_defconfig
+          grep -n "KPROBES" arch/arm64/configs/gki_defconfig || echo "no KPROBES lines in gki_defconfig"
+          cd "$GITHUB_WORKSPACE/android-kernel"
+          B="${{ env.KERNEL_REL }}/BUILD.bazel"
+          if grep -q "check_defconfig" "$B"; then
+            sed -i 's/check_defconfig *= *"[a-z]*"/check_defconfig = "disabled"/' "$B"
+          else
+            sed -i '0,/name = "kernel_aarch64",/s//name = "kernel_aarch64",\n    check_defconfig = "disabled",/' "$B"
+          fi
+          grep -n "check_defconfig" "$B" || echo "check_defconfig not set"
+
+      - name: Build boot.img
+        run: |
+          cd android-kernel
+          mkdir -p ../dist_output out/dist
+          TARGET="//${{ env.KERNEL_REL }}:kernel_aarch64_dist"
+          if ! tools/bazel query "$TARGET" >/dev/null 2>&1; then
+            echo "Target $TARGET not found, searching..."
+            TARGET=$(tools/bazel query 'kind(copy_to_dist_dir, //...)' 2>/dev/null | grep -E 'kernel_aarch64_dist$' | head -n 1)
+          fi
+          if [ -z "$TARGET" ]; then
+            echo "::error::No kernel_aarch64_dist target found"
+            tools/bazel query 'kind(copy_to_dist_dir, //...)' 2>&1 | head -n 40
+            exit 1
+          fi
+          {
+            echo "WORKFLOW ksunext-v2 run ${{ github.run_number }}"
+            echo "LINEAGE_BRANCH=${{ env.lineage_branch }}"
+            echo "TARGET=$TARGET"
+            echo "-----"
+          } > ../build.log
+          cat ../build.log
+          set +e
+          tools/bazel run --lto=thin --config=stamp "$TARGET" -- --destdir="$PWD/out/dist" >> ../build.log 2>&1
+          RC=$?
+          set -e
+          tail -n 60 ../build.log
+          if [ $RC -ne 0 ]; then
+            echo "=========== BUILD FAILED (exit $RC) ==========="
+            echo "----- first ERROR lines -----"
+            grep -n -m 40 -E "ERROR|error:|fatal|FAILED|Unrecognized" ../build.log || true
+            exit 1
+          fi
+          find out -type f -name "boot*.img"
+          BOOT=$(find out -type f -name boot.img | head -n 1)
+          if [ -z "$BOOT" ]; then
+            echo "::error::boot.img not found in output"
+            find out -type f | head -n 50
+            exit 1
+          fi
+          cp "$BOOT" ../dist_output/boot.img
+
+      - name: Upload Build Log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ github.run_number }}
+          path: build.log
+          if-no-files-found: ignore
+
+      - name: Upload Raw boot.img
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-shiba-${{ env.lineage_branch }}-kernelsu-next.img
+          path: dist_output/boot.img
+          if-no-files-found: error
