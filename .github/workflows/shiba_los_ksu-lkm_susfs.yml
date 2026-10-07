@@ -1,9 +1,7 @@
-name: Build Shiba KernelSU + SUSFS (Auto-Nightly)
+name: Build Shiba KernelSU + SUSFS
 
 on:
   workflow_dispatch:
-  # schedule:
-  #   - cron: '0 2 * * *' # You can uncomment this to have GitHub build it automatically every night
 
 jobs:
   build:
@@ -21,13 +19,10 @@ jobs:
 
       - name: Fetch Latest LineageOS init_boot.img
         run: |
-          # Query the LineageOS API for the absolute latest Shiba nightly
           API_URL="https://download.lineageos.org/api/v2/devices/shiba/builds"
-          
-          # Use jq to parse the JSON and grab the URL of the init_boot.img from the newest release
           INIT_BOOT_URL=$(curl -s "$API_URL" | jq -r '.[0].files[] | select(.filename == "init_boot.img") | .url')
           
-          if [ -z "$INIT_BOOT_URL" ] || [ "$INIT_BOOT_URL" == "null" ]; then
+          if [ -z "$INIT_BOOT_URL" ] \vert{}\vert{} [ "$INIT_BOOT_URL" == "null" ]; then
             echo "Failed to fetch init_boot URL from Lineage API."
             exit 1
           fi
@@ -35,13 +30,14 @@ jobs:
           echo "Downloading latest init_boot from: $INIT_BOOT_URL"
           wget -qO stock_init_boot.img "$INIT_BOOT_URL"
 
-      - name: Sync LineageOS 23.2 Kernel Source
+      - name: Install Repo Tool and Sync LineageOS 23.2 Kernel Source
         run: |
+          sudo curl -o /usr/local/bin/repo https://storage.googleapis.com/git-repo-downloads/repo
+          sudo chmod a+x /usr/local/bin/repo
+          
           mkdir kernel_workspace && cd kernel_workspace
-          curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
-          chmod a+x ~/bin/repo
-          ~/bin/repo init -u https://github.com/LineageOS/android_kernel_manifest.git -b lineage-23.2
-          ~/bin/repo sync -c -j$(nproc --all)
+          repo init -u https://github.com/LineageOS/android_kernel_manifest.git -b lineage-23.2
+          repo sync -c -j$(nproc --all)
 
       - name: Integrate tiann's KernelSU
         run: |
@@ -51,7 +47,6 @@ jobs:
       - name: Fetch and Apply simonpunk's SUSFS v2.3+
         run: |
           cd kernel_workspace/private/google-modules/soc/gs
-          # Clone the active GKI Android 14 6.1 branch
           git clone --depth=1 -b gki-android14-6.1 https://gitlab.com/simonpunk/susfs4ksu.git ../susfs
           
           # Patch KSU directory
@@ -62,85 +57,4 @@ jobs:
           
           # Copy SUSFS files into kernel tree
           cp -r ../susfs/kernel_patches/fs/* fs/
-          cp -r ../susfs/kernel_patches/include/linux/* include/linux/
-          
-          # Patch main kernel
-          patch -p1 < ../susfs/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch
-
-      - name: Configure LKM Mode & Enable SUSFS
-        run: |
-          cd kernel_workspace/private/google-modules/soc/gs
-          echo "CONFIG_KSU=m" >> arch/arm64/configs/zuma_defconfig
-          echo "CONFIG_KSU_SUSFS=y" >> arch/arm64/configs/zuma_defconfig
-
-      - name: Build Kernel (Kleaf Bazel)
-        run: |
-          cd kernel_workspace
-          # Build the kernel entirely from source
-          tools/bazel build //private/google-modules/soc/gs:gs_kernel_shiba --config=fast
-          
-          # Extract the compiled Kernel module and the newly compiled boot.img
-          find out/ bazel-out/ -name "kernelsu.ko" -exec cp {} ../ \;
-          find out/ bazel-out/ -name "boot.img" -exec cp {} ../built_boot.img \;
-
-      - name: Patch stock init_boot with ksud (LKM)
-        run: |
-          wget https://github.com/tiann/KernelSU/releases/latest/download/ksud-x86_64-unknown-linux-musl.tar.gz
-          tar -xf ksud-*.tar.gz
-          chmod +x ksud
-          export PATH=$PATH:$(pwd)
-          
-          # Inject the module into the dynamically downloaded Lineage ramdisk
-          ksud boot-patch -b built_boot.img -i stock_init_boot.img -m kernelsu.ko
-          
-          mv init_boot-patched.img final_init_boot.img
-          mv built_boot.img final_boot.img
-
-      - name: Package AnyKernel3 Zip
-        run: |
-          git clone https://github.com/osm0sis/AnyKernel3.git
-          cd AnyKernel3
-          
-          # Clean up placeholder directories from AK3 to force direct image flashing
-          rm -rf boot-PATCH.sh init-PATCH.sh patch/ ramdisk/ modules/
-          
-          # Copy our final images to the AnyKernel root
-          cp ../final_boot.img boot.img
-          cp ../final_init_boot.img init_boot.img
-          
-          # Create custom anykernel.sh for A/B slot routing
-          cat << 'EOF' > anykernel.sh
-          properties() { '
-          kernel.string=LineageOS 23.2 Shiba KernelSU + SUSFS
-          do.devicecheck=1
-          do.modules=0
-          do.systemless=1
-          do.cleanup=1
-          do.cleanuponabort=0
-          device.name1=shiba
-          supported.versions=14,14.0,15,15.0
-          '; }
-          
-          block=boot;
-          is_slot_device=1;
-          ramdisk_compression=auto;
-          
-          . tools/ak3-core.sh;
-          
-          ui_print "--> Flashing boot image (Source-built SUSFS Kernel)..."
-          dd if=$home/boot.img of=$block
-          
-          block=init_boot;
-          setup_block;
-          
-          ui_print "--> Flashing init_boot image (KernelSU Ramdisk)..."
-          dd if=$home/init_boot.img of=$block
-          EOF
-          
-          zip -r9 ../Shiba-KSU-SUSFS-AnyKernel3.zip * -x .git README.md *placeholder
-
-      - name: Upload AnyKernel3 Flashable ZIP
-        uses: actions/upload-artifact@v4
-        with:
-          name: Shiba-KSU-SUSFS-AnyKernel3
-          path: Shiba-KSU-SUSFS-AnyKernel3.zip
+          cp -r ../sus
