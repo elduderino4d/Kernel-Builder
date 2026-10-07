@@ -22,7 +22,7 @@ jobs:
           API_URL="https://download.lineageos.org/api/v2/devices/shiba/builds"
           INIT_BOOT_URL=$(curl -s "$API_URL" | jq -r '.[0].files[] | select(.filename == "init_boot.img") | .url')
           
-          if [ -z "$INIT_BOOT_URL" ] \vert{}\vert{} [ "$INIT_BOOT_URL" == "null" ]; then
+          if [ -z "$INIT_BOOT_URL" ] || [ "$INIT_BOOT_URL" == "null" ]; then
             echo "Failed to fetch init_boot URL from Lineage API."
             exit 1
           fi
@@ -45,4 +45,106 @@ jobs:
           # Fetch the absolute latest stable release tag of KernelSU via GitHub API
           # This guarantees the static SUSFS patches apply cleanly
           KSU_VERSION=$(curl -s https://api.github.com/repos/tiann/KernelSU/releases/latest | jq -r .tag_name)
-          echo "Fetching Latest KernelSU Stable Release:
+          echo "Fetching Latest KernelSU Stable Release: $KSU_VERSION"
+          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s "$KSU_VERSION"
+
+      - name: Fetch and Apply simonpunk's SUSFS v2.3+
+        run: |
+          cd kernel_workspace/private/google-modules/soc/gs
+          git clone --depth=1 -b gki-android14-6.1 https://gitlab.com/simonpunk/susfs4ksu.git ../susfs
+          
+          # 1. Patch KSU directory with integrated error logging
+          cp ../susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch KernelSU/
+          cd KernelSU
+          
+          echo "=== Applying SUSFS Patch to KernelSU ==="
+          if ! patch -p1 < 10_enable_susfs_for_ksu.patch; then
+            echo "::error::KernelSU Patch failed! Printing rejected hunks for debugging:"
+            find . -name "*.rej" -exec cat {} +
+            exit 1
+          fi
+          cd ..
+          
+          # 2. Copy SUSFS files into kernel tree
+          cp -r ../susfs/kernel_patches/fs/* fs/
+          cp -r ../susfs/kernel_patches/include/linux/* include/linux/
+          
+          # 3. Patch main kernel with integrated error logging
+          echo "=== Applying SUSFS Patch to Main Kernel ==="
+          if ! patch -p1 < ../susfs/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch; then
+            echo "::error::Main kernel patch failed! Printing rejected hunks for debugging:"
+            find . -name "*.rej" -exec cat {} +
+            exit 1
+          fi
+
+      - name: Configure LKM Mode & Enable SUSFS
+        run: |
+          cd kernel_workspace/private/google-modules/soc/gs
+          echo "CONFIG_KSU=m" >> arch/arm64/configs/zuma_defconfig
+          echo "CONFIG_KSU_SUSFS=y" >> arch/arm64/configs/zuma_defconfig
+
+      - name: Build Kernel (Kleaf Bazel)
+        run: |
+          cd kernel_workspace
+          tools/bazel build //private/google-modules/soc/gs:gs_kernel_shiba --config=fast
+          
+          find out/ bazel-out/ -name "kernelsu.ko" -exec cp {} ../ \;
+          find out/ bazel-out/ -name "boot.img" -exec cp {} ../built_boot.img \;
+
+      - name: Patch stock init_boot with ksud (LKM)
+        run: |
+          wget https://github.com/tiann/KernelSU/releases/latest/download/ksud-x86_64-unknown-linux-musl.tar.gz
+          tar -xf ksud-*.tar.gz
+          chmod +x ksud
+          export PATH=$PATH:$(pwd)
+          
+          ksud boot-patch -b built_boot.img -i stock_init_boot.img -m kernelsu.ko
+          
+          mv init_boot-patched.img final_init_boot.img
+          mv built_boot.img final_boot.img
+
+      - name: Package AnyKernel3 Zip
+        run: |
+          git clone https://github.com/osm0sis/AnyKernel3.git
+          cd AnyKernel3
+          
+          rm -rf boot-PATCH.sh init-PATCH.sh patch/ ramdisk/ modules/
+          
+          cp ../final_boot.img boot.img
+          cp ../final_init_boot.img init_boot.img
+          
+          cat << 'EOF' > anykernel.sh
+          properties() { '
+          kernel.string=LineageOS 23.2 Shiba KernelSU + SUSFS
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=shiba
+          supported.versions=14,14.0,15,15.0
+          '; }
+          
+          block=boot;
+          is_slot_device=1;
+          ramdisk_compression=auto;
+          
+          . tools/ak3-core.sh;
+          
+          ui_print "--> Flashing boot image (Source-built SUSFS Kernel)..."
+          dd if=$home/boot.img of=$block
+          
+          block=init_boot;
+          setup_block;
+          
+          ui_print "--> Flashing init_boot image (KernelSU Ramdisk)..."
+          dd if=$home/init_boot.img of=$block
+          EOF
+          
+          zip -r9 ../Shiba-KSU-SUSFS-AnyKernel3.zip * -x .git README.md *placeholder
+
+      - name: Upload AnyKernel3 Flashable ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: Shiba-KSU-SUSFS-AnyKernel3
+          path: Shiba-KSU-SUSFS-AnyKernel3.zip
