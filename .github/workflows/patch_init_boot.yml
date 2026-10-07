@@ -3,7 +3,7 @@ name: Patch Pixel 8 (shiba) LineageOS init_boot with KernelSU (LKM)
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 0 * * 0'
+    - cron: '0 0 * * 0' # Optional: Automatically runs every Sunday at midnight
 
 jobs:
   build:
@@ -17,7 +17,7 @@ jobs:
 
     - name: Fetch latest LineageOS (shiba) init_boot
       run: |
-        # Query LineageOS API for the newest Pixel 8 build and extract the init_boot.img URL
+        # Query LineageOS v2 API for the newest Pixel 8 build and extract the init_boot.img URL
         INIT_BOOT_URL=$(curl -s "https://download.lineageos.org/api/v2/devices/shiba/builds" | jq -r '.[0].files[] | select(.filename == "init_boot.img") | .url')
         
         # Failsafe check
@@ -29,26 +29,19 @@ jobs:
         echo "Downloading init_boot.img from: $INIT_BOOT_URL"
         wget -q "$INIT_BOOT_URL" -O init_boot.img
 
-    - name: Setup magiskboot
-      run: |
-        # ksud requires magiskboot to unpack and repack the ramdisk
-        wget -qO magiskboot https://github.com/xiaolu/magiskboot_build/releases/latest/download/magiskboot.x86_64
-        sudo mv magiskboot /usr/local/bin/magiskboot
-        sudo chmod +x /usr/local/bin/magiskboot
-
     - name: Setup KernelSU CLI (ksud)
       run: |
-        # Grab the latest Linux x86_64 build of ksud
-        KSUD_URL=$(curl -s https://api.github.com/repos/tiann/KernelSU/releases/latest | jq -r '.assets[] | select(.name | test("ksud-x86_64-unknown-linux.*.tar.gz")) | .browser_download_url' | head -n 1)
-        wget -qO ksud.tar.gz "$KSUD_URL"
-        tar -xzf ksud.tar.gz
-        sudo mv ksud /usr/local/bin/
+        # Grab the latest Linux x86_64 musl binary of ksud (Note: distributed as a raw binary, not a tarball)
+        KSUD_URL=$(curl -s https://api.github.com/repos/tiann/KernelSU/releases/latest | jq -r '.assets[] | select(.name == "ksud-x86_64-unknown-linux-musl") | .browser_download_url' | head -n 1)
+        wget -qO /usr/local/bin/ksud "$KSUD_URL"
         sudo chmod +x /usr/local/bin/ksud
 
     - name: Patch init_boot.img with KernelSU (LKM Mode)
       run: |
-        # Use ksud to inject the Kernel Module into the downloaded init_boot
-        ksud boot-patch -b init_boot.img --magiskboot /usr/local/bin/magiskboot
+        # ksud uses its built-in bootimg parser (magiskboot is no longer required).
+        # Because init_boot lacks a kernel to sniff the KMI from, we must explicitly declare it.
+        # Pixel 8 (Tensor G3) on Android 14 uses the android14-6.1 KMI.
+        ksud boot-patch -b init_boot.img --kmi android14-6.1
         
         # Verify the patched file was created
         ls -la kernelsu_*.img || echo "Failed to locate patched image"
