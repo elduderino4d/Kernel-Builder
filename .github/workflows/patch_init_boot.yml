@@ -1,0 +1,71 @@
+name: Patch Pixel 8 (shiba) LineageOS init_boot with KernelSU (LKM)
+
+on:
+  workflow_dispatch: # Allows manual triggering from the GitHub Actions tab
+  schedule:
+    - cron: '0 0 * * 0' # Optional: Automatically runs every Sunday at midnight
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y jq curl wget unzip
+
+    - name: Fetch latest LineageOS (shiba) build
+      run: |
+        # Query LineageOS API for the newest Pixel 8 build URL
+        BUILD_URL=$(curl -s "https://download.lineageos.org/api/v2/devices/shiba/builds" | jq -r '.[0].url')
+        echo "Downloading LineageOS from: $BUILD_URL"
+        wget -q "$BUILD_URL" -O lineageos.zip
+        
+        # Extract the payload.bin from the ROM zip
+        unzip lineageos.zip payload.bin
+
+    - name: Setup payload-dumper-go
+      run: |
+        wget -qO payload-dumper-go.tar.gz https://github.com/ssut/payload-dumper-go/releases/latest/download/payload-dumper-go_linux_amd64.tar.gz
+        tar -xzf payload-dumper-go.tar.gz
+        sudo mv payload-dumper-go /usr/local/bin/
+
+    - name: Extract init_boot.img
+      run: |
+        # Extract only the init_boot partition to save time
+        payload-dumper-go -p init_boot payload.bin
+        
+        # Move the file out of the timestamped extraction folder
+        mv extracted_*/init_boot.img init_boot.img
+
+    - name: Setup magiskboot
+      run: |
+        # ksud requires magiskboot to unpack and repack the ramdisk
+        wget -qO magiskboot https://github.com/xiaolu/magiskboot_build/releases/latest/download/magiskboot.x86_64
+        sudo mv magiskboot /usr/local/bin/magiskboot
+        sudo chmod +x /usr/local/bin/magiskboot
+
+    - name: Setup KernelSU CLI (ksud)
+      run: |
+        # Grab the latest Linux x86_64 build of ksud
+        KSUD_URL=$(curl -s https://api.github.com/repos/tiann/KernelSU/releases/latest | jq -r '.assets[] | select(.name | test("ksud-x86_64-unknown-linux.*.tar.gz")) | .browser_download_url' | head -n 1)
+        wget -qO ksud.tar.gz "$KSUD_URL"
+        tar -xzf ksud.tar.gz
+        sudo mv ksud /usr/local/bin/
+        sudo chmod +x /usr/local/bin/ksud
+
+    - name: Patch init_boot.img with KernelSU (LKM Mode)
+      run: |
+        # Use ksud to inject the Kernel Module into the init_boot ramdisk
+        ksud boot-patch -b init_boot.img --magiskboot /usr/local/bin/magiskboot
+        
+        # Verify generation
+        ls -la kernelsu_*.img || echo "Failed to locate patched image"
+
+    - name: Upload Patched Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: kernelsu_patched_init_boot_shiba
+        path: kernelsu_*.img
+        retention-days: 7
