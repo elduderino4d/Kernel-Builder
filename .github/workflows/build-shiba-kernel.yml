@@ -1,13 +1,13 @@
-name: Build LineageOS Boot Image (Pixel 8) with KernelSU & SuSFS
+name: Build LineageOS Boot Image (Pixel 8) with Standalone SuSFS
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 0 * * 0'
+    - cron: '0 0 * * 0' # Builds weekly to keep up with LineageOS source changes
 
 jobs:
   build-boot-image:
-    name: Build Pixel 8 boot.img
+    name: Build Pixel 8 Standalone SuSFS boot.img
     runs-on: ubuntu-24.04
 
     steps:
@@ -28,20 +28,15 @@ jobs:
           chmod a+x ~/bin/repo
           echo "$HOME/bin" >> $GITHUB_PATH
 
-      - name: Detect Sources and Kernel Version
+      - name: Detect Latest LineageOS & SuSFS
         id: detect
         run: |
-          # 1. Fetch newest stable LineageOS branch for Pixel 8 (Zuma)
+          # 1. Fetch newest stable LineageOS branch for Pixel 8 (Google Zuma)
           LINEAGE_BRANCH=$(git ls-remote --heads https://github.com/LineageOS/android_kernel_google_zuma.git | grep 'refs/heads/lineage-' | awk -F/ '{print $3}' | sort -V | tail -n 1)
           echo "LineageOS Branch: $LINEAGE_BRANCH"
           echo "lineage_branch=$LINEAGE_BRANCH" >> $GITHUB_ENV
 
-          # 2. Fetch latest KernelSU tag
-          KSU_VERSION=$(curl -s https://api.github.com/repos/tiann/KernelSU/releases/latest | jq -r .tag_name)
-          echo "KernelSU Version: $KSU_VERSION"
-          echo "ksu_version=$KSU_VERSION" >> $GITHUB_ENV
-
-          # 3. Fetch latest SuSFS release tag
+          # 2. Fetch latest stable SuSFS release tag from simonpunk's repository
           SUSFS_VERSION=$(git ls-remote --tags https://gitlab.com/simonpunk/susfs4ksu.git | grep -v '\^{}$' | awk -F/ '{print $3}' | sort -V | tail -n 1)
           echo "SuSFS Version: $SUSFS_VERSION"
           echo "susfs_version=$SUSFS_VERSION" >> $GITHUB_ENV
@@ -52,50 +47,41 @@ jobs:
           git clone https://github.com/LineageOS/android_kernel_google_zuma.git -b ${{ env.lineage_branch }} --depth=1 common
           echo "KERNEL_DIR=$PWD/common" >> $GITHUB_ENV
 
-      - name: Setup KernelSU & Match SuSFS Patches
+      - name: Patch Standalone SuSFS into Kernel
         run: |
           cd ${{ env.KERNEL_DIR }}
 
-          # Install KernelSU
-          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s ${{ env.ksu_version }}
-
-          # Clone SuSFS
+          # Clone simonpunk's SuSFS repo
           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b ${{ env.susfs_version }} ../susfs4ksu
 
-          # Apply SuSFS patch to KernelSU
-          cp ../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch KernelSU/
-          cd KernelSU
-          patch -p1 < 10_enable_susfs_for_ksu.patch
-          cd ..
-
-          # Copy SuSFS header and fs source code directly as mandated by SuSFS docs
+          # Copy core SuSFS C files and headers into kernel filesystem tree
           cp -r ../susfs4ksu/kernel_patches/fs/* fs/
           cp -r ../susfs4ksu/kernel_patches/include/linux/* include/linux/
 
-          # Detect matching GKI kernel patch (e.g., android14-6.1)
-          # SuSFS docs dictate matching kernel-gki-*.patch to the underlying GKI major version
+          # Detect and apply matching GKI kernel patch (e.g. android14-6.1)
           MATCHED_PATCH=$(ls ../susfs4ksu/kernel_patches/50_add_susfs_in_kernel-gki-*.patch | sort -V | tail -n 1)
-          echo "Applying matched GKI kernel patch: $MATCHED_PATCH"
+          echo "Applying GKI kernel patch: $MATCHED_PATCH"
           patch -p1 < "$MATCHED_PATCH" || true
 
-          # Inject mandatory SuSFS configurations into defconfig
-          echo "CONFIG_KSU=y" >> arch/arm64/configs/shiba_defconfig
-          echo "CONFIG_KSU_SUSFS=y" >> arch/arm64/configs/shiba_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_SU=y" >> arch/arm64/configs/shiba_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> arch/arm64/configs/shiba_defconfig
+          # Inject mandatory SuSFS kernel feature flags (without KernelSU)
+          echo "CONFIG_SUSFS=y" >> arch/arm64/configs/shiba_defconfig
+          echo "CONFIG_SUSFS_SUS_MOUNT=y" >> arch/arm64/configs/shiba_defconfig
+          echo "CONFIG_SUSFS_SUS_PATH=y" >> arch/arm64/configs/shiba_defconfig
+          echo "CONFIG_SUSFS_SUS_KSTAT=y" >> arch/arm64/configs/shiba_defconfig
+          echo "CONFIG_SUSFS_SPOOF_UNAME=y" >> arch/arm64/configs/shiba_defconfig
 
-      - name: Build boot.img File
+      - name: Build boot.img
         run: |
           cd android-kernel/common
 
-          # Build GKI kernel with boot.img packing target
+          # Build Bazel/Kleaf boot image target for Pixel 8 (Tensor G3)
           LTO=thin BUILD_CONFIG=common/build.config.shiba BUILD_BOOT_IMG=1 build/build.sh
 
-          # Stage final boot image output
+          # Move compiled boot.img to output path
           mkdir -p ../../dist_output
           find ../out -type f -name "boot.img" -exec cp {} ../../dist_output/boot.img \;
 
-      - name: Export boot.img Artifact
+      - name: Upload Raw boot.img
         uses: actions/upload-artifact@v4
         with:
           name: boot-shiba-susfs.img
