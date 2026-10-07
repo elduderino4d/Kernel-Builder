@@ -9,7 +9,6 @@ jobs:
   build-boot-image:
     name: Build Pixel 8 LineageOS 23.2 SuSFS boot.img
     runs-on: ubuntu-22.04
-
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -17,35 +16,29 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc bison build-essential ccache curl flex \
-            g++-multilib gcc-multilib git gnupg gperf lib32ncurses5-dev \
-            lib32readline-dev lib32z1-dev liblz4-tool libncurses5 libncurses5-dev \
-            libssl-dev libxml2 libxml2-utils lzop pngcrush rsync \
-            schedtool squashfs-tools xsltproc zip zlib1g-dev python3 jq
-
+          sudo apt-get install -y bc bison build-essential ccache curl flex g++-multilib gcc-multilib git gnupg gperf lib32ncurses5-dev lib32readline-dev lib32z1-dev liblz4-tool libncurses5 libncurses5-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 jq
           mkdir -p ~/bin
           curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
           chmod a+x ~/bin/repo
           echo "$HOME/bin" >> $GITHUB_PATH
 
-      - name: Set LineageOS 23.2 Branch
+      - name: Set LineageOS Branch
         run: |
+          M=https://github.com/LineageOS/android_kernel_google_gs-6.1_manifest.git
           TARGET_BRANCH="lineage-23.2"
-
-          REMOTE_CHECK=$(git ls-remote --heads https://github.com/LineageOS/android_kernel_google_gs-6.1_manifest.git refs/heads/$TARGET_BRANCH)
-          if [ -z "$REMOTE_CHECK" ]; then
-            TARGET_BRANCH=$(git ls-remote --heads https://github.com/LineageOS/android_kernel_google_gs-6.1_manifest.git | grep 'lineage-23' | awk -F/ '{print $3}' | sort -V | tail -n 1)
+          CHECK=$(git ls-remote --heads $M refs/heads/$TARGET_BRANCH)
+          if [ -z "$CHECK" ]; then
+            TARGET_BRANCH=$(git ls-remote --heads $M | grep 'lineage-23' | awk -F/ '{print $3}' | sort -V | tail -n 1)
           fi
-
           echo "LineageOS Branch: $TARGET_BRANCH"
           echo "lineage_branch=$TARGET_BRANCH" >> $GITHUB_ENV
 
       - name: Sync LineageOS Kernel Tree
         run: |
-          mkdir -p android-kernel && cd android-kernel
+          mkdir -p android-kernel
+          cd android-kernel
           repo init -u https://github.com/LineageOS/android_kernel_google_gs-6.1_manifest.git -b ${{ env.lineage_branch }} --depth=1
           repo sync -c -j$(nproc --all) --no-tags --no-clone-bundle
-
           KDIR=""
           while IFS= read -r mk; do
             d=$(dirname "$mk")
@@ -54,7 +47,6 @@ jobs:
               break
             fi
           done < <(find "$PWD" -maxdepth 4 -name Makefile -not -path '*/out/*' | sort)
-
           if [ -z "$KDIR" ]; then
             echo "::error::Could not locate kernel source tree"
             ls -la
@@ -68,47 +60,31 @@ jobs:
           cd "${{ env.KERNEL_DIR }}"
           pwd
           ls
-
           K_VER=$(grep -E '^VERSION =' Makefile | awk '{print $3}')
           K_PATCH=$(grep -E '^PATCHLEVEL =' Makefile | awk '{print $3}')
           GKI_VERSION="${K_VER}.${K_PATCH}"
           echo "Detected kernel version: $GKI_VERSION"
-
           rm -rf ../susfs4ksu
-          git clone --depth=1 -b "gki-android14-${GKI_VERSION}" https://gitlab.com/simonpunk/susfs4ksu.git ../susfs4ksu \
-            || git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git ../susfs4ksu
-
+          git clone --depth=1 -b "gki-android14-${GKI_VERSION}" https://gitlab.com/simonpunk/susfs4ksu.git ../susfs4ksu || git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git ../susfs4ksu
           mkdir -p fs include/linux
           cp ../susfs4ksu/kernel_patches/fs/* fs/
           cp ../susfs4ksu/kernel_patches/include/linux/* include/linux/
-
-          MATCHED_PATCH=$(find ../susfs4ksu/kernel_patches -maxdepth 1 -name "50_add_susfs_in_*gki*${GKI_VERSION}*.patch" | sort -V | tail -n 1)
-          if [ -z "$MATCHED_PATCH" ]; then
-            echo "No exact match for ${GKI_VERSION}, using latest GKI patch..."
-            MATCHED_PATCH=$(find ../susfs4ksu/kernel_patches -maxdepth 1 -name "50_add_susfs_in_*gki*.patch" | sort -V | tail -n 1)
+          P=$(find ../susfs4ksu/kernel_patches -maxdepth 1 -name "50_add_susfs_in_*gki*${GKI_VERSION}*.patch" | sort -V | tail -n 1)
+          if [ -z "$P" ]; then
+            echo "No exact match, using latest GKI patch..."
+            P=$(find ../susfs4ksu/kernel_patches -maxdepth 1 -name "50_add_susfs_in_*gki*.patch" | sort -V | tail -n 1)
           fi
-
-          if [ -z "$MATCHED_PATCH" ]; then
+          if [ -z "$P" ]; then
             echo "::error::No SuSFS patch found"
             ls ../susfs4ksu/kernel_patches
             exit 1
           fi
-
-          echo "Applying SuSFS patch: $MATCHED_PATCH"
-          patch -p1 --forward < "$MATCHED_PATCH" || {
-            echo "::warning::Patch had rejects"
-            find . -name '*.rej' | head
-          }
-
+          echo "Applying SuSFS patch: $P"
+          patch -p1 --forward < "$P" || echo "::warning::Patch had rejects"
           for cfg in arch/arm64/configs/gki_defconfig arch/arm64/configs/shiba_defconfig; do
             if [ -f "$cfg" ]; then
               echo "Injecting SuSFS configs into $cfg"
-              printf '%s\n' \
-                CONFIG_KSU_SUSFS=y \
-                CONFIG_KSU_SUSFS_SUS_MOUNT=y \
-                CONFIG_KSU_SUSFS_SUS_PATH=y \
-                CONFIG_KSU_SUSFS_SUS_KSTAT=y \
-                CONFIG_KSU_SUSFS_SPOOF_UNAME=y >> "$cfg"
+              printf '%s\n' CONFIG_KSU_SUSFS=y CONFIG_KSU_SUSFS_SUS_MOUNT=y CONFIG_KSU_SUSFS_SUS_PATH=y CONFIG_KSU_SUSFS_SUS_KSTAT=y CONFIG_KSU_SUSFS_SPOOF_UNAME=y >> "$cfg"
             fi
           done
 
@@ -116,7 +92,6 @@ jobs:
         run: |
           cd android-kernel
           LTO=thin BUILD_BOOT_IMG=1 build/build.sh
-
           mkdir -p ../dist_output
           find out -type f -name "boot.img" -exec cp {} ../dist_output/boot.img \;
 
