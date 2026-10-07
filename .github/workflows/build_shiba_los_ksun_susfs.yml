@@ -134,7 +134,7 @@ jobs:
 
       - name: Integrate KernelSU-Next and SUSFS
         run: |
-          echo "WORKFLOW ksunext-susfs-v1 run ${{ github.run_number }}"
+          echo "WORKFLOW ksunext-susfs-v2 run ${{ github.run_number }}"
           cd "${{ env.KERNEL_DIR }}"
 
           KSU_REPO=https://github.com/pershoot/KernelSU-Next
@@ -193,15 +193,34 @@ jobs:
           echo "Applying SUSFS patch: $P"
           set +e
           patch -p1 --forward < "$P"
-          PRC=$?
           set -e
+
           REJ=$(find . -name '*.rej' -not -path './out/*')
-          if [ $PRC -ne 0 ] || [ -n "$REJ" ]; then
+          if [ "$REJ" = "./fs/namespace.c.rej" ] && ! grep -q "susfs_def.h" fs/namespace.c; then
+            echo "Applying the fs/namespace.c header hunk manually"
+          python3 - << 'PYEOF'
+          p = 'fs/namespace.c'
+          s = open(p).read()
+          a = '#include "pnode.h"\n'
+          b = '#include "internal.h"\n'
+          inc = '#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs_def.h>\n#endif // #ifdef CONFIG_KSU_SUSFS\n'
+          ext = '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\nextern bool susfs_is_current_ksu_domain(void);\nextern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;\n\n#define CL_COPY_MNT_NS BIT(25) /* used by copy_mnt_ns() */\n#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\n'
+          assert a in s and b in s, "anchor lines not found in fs/namespace.c"
+          s = s.replace(a, inc + a, 1)
+          s = s.replace(b, b + ext, 1)
+          open(p, 'w').write(s)
+          PYEOF
+            rm -f fs/namespace.c.rej fs/namespace.c.orig
+          fi
+          REJ=$(find . -name '*.rej' -not -path './out/*')
+          if [ -n "$REJ" ]; then
             echo "::error::SUSFS patch did not apply cleanly"
-            echo "$REJ"
             for r in $REJ; do echo "----- $r"; cat "$r"; done
             exit 1
           fi
+          echo "SUSFS patch applied. Checking fs/namespace.c header:"
+          sed -n '25,60p' fs/namespace.c
+          ls include/linux/susfs_def.h
 
           for cfg in arch/arm64/configs/*_defconfig; do
             sed -i '/CONFIG_KSU/d' "$cfg"
@@ -238,7 +257,7 @@ jobs:
             exit 1
           fi
           {
-            echo "WORKFLOW ksunext-susfs-v1 run ${{ github.run_number }}"
+            echo "WORKFLOW ksunext-susfs-v2 run ${{ github.run_number }}"
             echo "LINEAGE_BRANCH=${{ env.lineage_branch }}"
             echo "TARGET=$TARGET"
             echo "-----"
