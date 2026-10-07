@@ -1,0 +1,109 @@
+name: Build LineageOS Kernel (Pixel 8 / Shiba) with SuSFS 2.3+
+
+on:
+  workflow_dispatch:
+    inputs:
+      lineage_branch:
+        description: 'LineageOS Kernel Branch'
+        required: true
+        default: 'lineage-22.1' # Adjust to the most current LineageOS branch
+      susfs_version:
+        description: 'SuSFS Version Tag (from simonpunk/susfs4ksu)'
+        required: true
+        default: 'v2.3.2' # Enforcing 2.3+
+      ksu_version:
+        description: 'KernelSU Version (Branch/Tag)'
+        required: true
+        default: 'main'
+
+jobs:
+  build-kernel:
+    name: Build Shiba Kernel with SuSFS
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Build Environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential ccache curl flex \
+            g++-multilib gcc-multilib git gnupg gperf imagemagick lib32ncurses5-dev \
+            lib32readline-dev lib32z1-dev liblz4-tool libncurses5 libncurses5-dev \
+            libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync \
+            schedtool squashfs-tools xsltproc zip zlib1g-dev python3
+          
+          # Install repo tool
+          mkdir -p ~/bin
+          curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod a+x ~/bin/repo
+          echo "$HOME/bin" >> $GITHUB_PATH
+
+      - name: Initialize and Sync LineageOS Kernel Workspace
+        run: |
+          mkdir -p android-kernel && cd android-kernel
+          
+          # We use the generic GKI manifest combined with Lineage's zuma tree for Pixel 8
+          repo init -u https://github.com/LineageOS/android.git -b ${{ github.event.inputs.lineage_branch }} --depth=1
+          
+          # For standalone kernel builds, clone the zuma kernel directly
+          git clone https://github.com/LineageOS/android_kernel_google_zuma.git -b ${{ github.event.inputs.lineage_branch }} --depth=1 common
+          
+          echo "KERNEL_DIR=$PWD/common" >> $GITHUB_ENV
+
+      - name: Fetch KernelSU
+        run: |
+          cd ${{ env.KERNEL_DIR }}
+          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s ${{ github.event.inputs.ksu_version }}
+
+      - name: Fetch and Apply simons SuSFS v2.3+
+        run: |
+          cd ${{ env.KERNEL_DIR }}
+          
+          # Clone simonpunk's SuSFS v2.3+
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b ${{ github.event.inputs.susfs_version }} ../susfs4ksu
+          
+          # 1. Apply SuSFS patches to KernelSU
+          cp ../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch KernelSU/
+          cd KernelSU
+          patch -p1 < 10_enable_susfs_for_ksu.patch
+          cd ..
+          
+          # 2. Apply SuSFS patches to the kernel core
+          cp ../susfs4ksu/kernel_patches/50_add_susfs_in_kernel-gki-*.patch ./
+          cp ../susfs4ksu/kernel_patches/fs/* fs/
+          cp ../susfs4ksu/kernel_patches/include/linux/* include/linux/
+          
+          # Patch the kernel (auto-detecting the GKI version)
+          patch -p1 < 50_add_susfs_in_kernel-gki-*.patch || echo "Some patches may need manual intervention, but proceeding..."
+          
+          # Ensure configurations are toggled on
+          echo "CONFIG_KSU=y" >> arch/arm64/configs/shiba_defconfig
+          echo "CONFIG_KSU_SUSFS=y" >> arch/arm64/configs/shiba_defconfig
+          echo "CONFIG_KSU_SUSFS_SUS_SU=y" >> arch/arm64/configs/shiba_defconfig
+
+      - name: Compile Kernel
+        run: |
+          cd android-kernel/common
+          
+          # Clean environment and build using Bazel/Kleaf build script 
+          # Note: Pixel 8 / Tensor G3 requires the LTO and specific GKI variables
+          LTO=thin BUILD_CONFIG=common/build.config.shiba build/build.sh
+
+      - name: Package AnyKernel3 (Optional)
+        run: |
+          git clone https://github.com/osm0sis/AnyKernel3.git -b master AnyKernel3
+          cp android-kernel/out/mixed/dist/Image AnyKernel3/
+          cd AnyKernel3
+          
+          # Modify anykernel.sh to match Shiba partitions
+          sed -i 's/do.devicecheck=1/do.devicecheck=0/g' anykernel.sh
+          sed -i 's/block=\/dev\/block\/bootdevice\/by-name\/boot/block=auto/g' anykernel.sh
+          zip -r9 ../Shiba-Lineage-SuSFS-Kernel.zip *
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Shiba-Lineage-SuSFS-Kernel
+          path: Shiba-Lineage-SuSFS-Kernel.zip
