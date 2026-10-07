@@ -1,4 +1,4 @@
-name: Build LineageOS Kernel (Pixel 8) with Official KSU-Next & SUSFS [LOCKED v1]
+name: TEST Build LineageOS Kernel (Pixel 8) with Official KSU-Next & SUSFS
 on:
   workflow_dispatch:
     inputs:
@@ -18,6 +18,7 @@ jobs:
     - name: Init logging
       run: |
         mkdir -p "$GITHUB_WORKSPACE/.ci" "$GITHUB_WORKSPACE/logs"
+        touch "$GITHUB_WORKSPACE/build.log" # Ensure file exists for artifact upload
         cat > "$GITHUB_WORKSPACE/.ci/stepinit.sh" << 'HELPEREOF'
         STEP_NAME="$1"
         LOGDIR="$GITHUB_WORKSPACE/logs"
@@ -27,16 +28,16 @@ jobs:
         export PS4='+ [L${LINENO}] '
         echo ""
         echo "=================================================================="
-        echo "[$(date -u +\%Y-\%m-\%dT\%H:\%M:\%SZ)] STEP START:${STEP_NAME}"
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] STEP START: ${STEP_NAME}"
         echo "=================================================================="
         STEP_T0=$(date +%s)
-        trap 'rc=$?; set +x; D=$(( $(date +\%s) - STEP_T0 )); echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] STEP END: ${STEP_NAME} exit=${rc} duration=${D}s"; echo "disk: $(df -h / | tail -n 1)"; printf "%s\t%s\t%s\n" "${STEP_NAME}" "${rc}" "${D}" >> "$LOGDIR/summary.tsv"; sleep 1' EXIT
+        trap 'rc=$?; set +x; D=$(( $(date +%s) - STEP_T0 )); echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] STEP END: ${STEP_NAME} exit=${rc} duration=${D}s"; echo "disk: $(df -h / | tail -n 1)"; printf "%s\t%s\t%s\n" "${STEP_NAME}" "${rc}" "${D}" >> "$LOGDIR/summary.tsv"; sleep 1' EXIT
         set -x
         HELPEREOF
         source "$GITHUB_WORKSPACE/.ci/stepinit.sh" "Init logging"
         echo "Workflow: ${GITHUB_WORKFLOW}  run=${GITHUB_RUN_NUMBER}  attempt=${GITHUB_RUN_ATTEMPT}"
         echo "Repo: ${GITHUB_REPOSITORY}  ref=${GITHUB_REF}  sha=${GITHUB_SHA}  actor=${GITHUB_ACTOR}"
-        echo "Runner: ${RUNNER_NAME:-} ${RUNNER_OS:-}${RUNNER_ARCH:-}"
+        echo "Runner: ${RUNNER_NAME:-} ${RUNNER_OS:-} ${RUNNER_ARCH:-}"
         uname -a
         head -n 5 /etc/os-release
         nproc
@@ -122,7 +123,7 @@ jobs:
         if [ -n "$INPUT_BRANCH" ] && [ "$INPUT_BRANCH" != "auto" ]; then
           CANDIDATES="$INPUT_BRANCH"
         else
-          CANDIDATES=$(git ls-remote --heads$M | awk -F'refs/heads/' '{print $2}' \vert{} grep -E '^lineage-[0-9]+(\.[0-9]+)?$' | sort -V -r)
+          CANDIDATES=$(git ls-remote --heads $M | awk -F'refs/heads/' '{print $2}' | grep -E '^lineage-[0-9]+(\.[0-9]+)?$' | sort -V -r)
         fi
         if [ -z "$CANDIDATES" ]; then
           echo "::error::No LineageOS branches found on manifest repo"
@@ -167,11 +168,11 @@ jobs:
           exit 1
         fi
         REL="${KDIR#$PWD/}"
-        if [ "$REL" = "$KDIR" ] \vert{}\vert{} [ -z "$REL" ]; then
+        if [ "$REL" = "$KDIR" ] || [ -z "$REL" ]; then
           echo "::error::Kernel source is not in a subfolder of the workspace: $KDIR"
           exit 1
         fi
-        echo "Kernel source: $KDIR (package:$REL)"
+        echo "Kernel source: $KDIR (package: $REL)"
         echo "KERNEL_DIR=$KDIR" >> $GITHUB_ENV
         echo "KERNEL_REL=$REL" >> $GITHUB_ENV
         grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL) =' "$KDIR/Makefile"
@@ -182,12 +183,12 @@ jobs:
         source "$GITHUB_WORKSPACE/.ci/stepinit.sh" "Integrate KernelSU-Next and SUSFS"
         cd "${{ env.KERNEL_DIR }}"
         
-        # Switched to official KernelSU-Next repository
+        # Switched to official KernelSU-Next repository and correct 'dev' branch
         KSU_REPO=https://github.com/rifsxd/KernelSU-Next
-        KSU_BRANCH=next
+        KSU_BRANCH=dev
         
         if ! git ls-remote --exit-code --heads "$KSU_REPO" "$KSU_BRANCH" > /dev/null; then
-          echo "::error::Branch $KSU_BRANCH not found in$KSU_REPO"
+          echo "::error::Branch $KSU_BRANCH not found in $KSU_REPO"
           git ls-remote --heads "$KSU_REPO" | head -n 30
           exit 1
         fi
@@ -197,7 +198,7 @@ jobs:
         KSU_TAG=$(git -C KernelSU-Next describe --tags --abbrev=0 2>/dev/null || echo v0.0.1)
         echo "KernelSU-Next commit: $(git -C KernelSU-Next rev-parse HEAD)"
         echo "KernelSU-Next tag: $KSU_TAG"
-        echo "KernelSU-Next commit count: $KSU_COUNT (manager version should be$((30000 + KSU_COUNT)))"
+        echo "KernelSU-Next commit count: $KSU_COUNT (manager version should be $((30000 + KSU_COUNT)))"
         echo "Repo kernel dir:"
         ls -la KernelSU-Next/kernel | head -n 40
         echo "app_profile.h locations:"
@@ -214,7 +215,7 @@ jobs:
           cp -rL "$(dirname "$F")"/. drivers/kernelsu/uapi/
         fi
         ls drivers/kernelsu/uapi
-        echo "KernelSU files: $(find drivers/kernelsu -type f \vert{} wc -l)  symlinks:$(find drivers/kernelsu -type l | wc -l)"
+        echo "KernelSU files: $(find drivers/kernelsu -type f | wc -l)  symlinks: $(find drivers/kernelsu -type l | wc -l)"
         KB=drivers/kernelsu/Kbuild
         [ -f "$KB" ] || KB=drivers/kernelsu/Makefile
         {
@@ -233,7 +234,7 @@ jobs:
         fi
         grep -n "kernelsu" drivers/Makefile drivers/Kconfig
         
-        # Softened requirement to warning since official next branch might not include SUSFS defaults yet
+        # Softened requirement to warning since official dev branch might not include SUSFS defaults yet
         if ! grep -rqi "susfs" drivers/kernelsu; then
           echo "::warning::This KernelSU-Next branch might lack built-in SUSFS hooks"
         fi
@@ -315,7 +316,7 @@ jobs:
         TARGET="//${{ env.KERNEL_REL }}:kernel_aarch64_dist"
         if ! tools/bazel query "$TARGET" >/dev/null 2>&1; then
           echo "Target $TARGET not found, searching..."
-          TARGET=$(tools/bazel query 'kind(copy_to_dist_dir, //...)' 2>/dev/null \vert{} grep -E 'kernel_aarch64_dist$' | head -n 1)
+          TARGET=$(tools/bazel query 'kind(copy_to_dist_dir, //...)' 2>/dev/null | grep -E 'kernel_aarch64_dist$' | head -n 1)
         fi
         if [ -z "$TARGET" ]; then
           echo "::error::No kernel_aarch64_dist target found"
@@ -411,4 +412,99 @@ jobs:
         echo "Zip integrity test:"
         unzip -t "$ZIP"
         for need in anykernel.sh META-INF/com/google/android/update-binary META-INF/com/google/android/updater-script tools/ak3-core.sh; do
-          if unzip -l "$ZIP" | grep -q "$need"; then             echo "OK: $
+          if unzip -l "$ZIP" | grep -q "$need"; then
+            echo "OK: $need present in zip"
+          else
+            echo "::error::$need missing from zip"
+            exit 1
+          fi
+        done
+        if unzip -l "$ZIP" | grep -E ' (Image|Image\.lz4|Image\.gz)$'; then
+          echo "OK: kernel image present in zip"
+        else
+          echo "::error::No kernel image in zip"
+          exit 1
+        fi
+        echo "anykernel.sh inside the zip:"
+        unzip -p "$ZIP" anykernel.sh
+        echo "Checksums and sizes:"
+        sha256sum "$ZIP" dist_output/boot.img
+        ls -la "$ZIP" dist_output/boot.img
+        VML=$(find android-kernel/out/dist -maxdepth 1 -name vmlinux | head -n 1)
+        if [ -n "$VML" ]; then
+          echo "Kernel version string:"
+          strings -a "$VML" | grep -m1 "Linux version" || true
+          echo "KernelSU and SUSFS strings in vmlinux:"
+          strings -a "$VML" | grep -iE "kernelsu|susfs" | sort -u | head -n 40 || true
+        else
+          echo "vmlinux not in dist, skipping string checks"
+        fi
+        echo "Kernel config files in dist:"
+        find android-kernel/out/dist -maxdepth 2 \( -name '.config' -o -name 'defconfig' -o -name '*config*' \) | head -n 10
+        for c in $(find android-kernel/out/dist -maxdepth 2 -name '.config' | head -n 1); do
+          grep -E "CONFIG_KSU|CONFIG_KPROBES" "$c" || true
+        done
+        echo "Bazel build log KernelSU lines:"
+        grep -n "KernelSU-Next version\|KernelSU-Next tag\|SUSFS_VERSION" build.log || true
+
+    - name: Final summary
+      if: always()
+      run: |
+        source "$GITHUB_WORKSPACE/.ci/stepinit.sh" "Final summary"
+        set +x
+        cd "$GITHUB_WORKSPACE"
+        touch logs/summary.tsv
+        EXPECTED=("Init logging" "Install Dependencies" "Prepare AnyKernel3" "Sync LineageOS Kernel Tree" "Integrate KernelSU-Next and SUSFS" "Build boot.img" "Package AnyKernel3 zip" "Verify outputs")
+        FAILS=0
+        {
+          echo "### Build summary (run ${{ github.run_number }}, branch ${{ env.lineage_branch }})"
+          echo ""
+          echo "| Step | Result | Duration |"
+          echo "|---|---|---|"
+        } >> "$GITHUB_STEP_SUMMARY"
+        echo ""
+        echo "================ TASK CHECKLIST ================"
+        for s in "${EXPECTED[@]}"; do
+          R=$(awk -F'\t' -v s="$s" '$1==s{rc=$2;d=$3;f=1} END{if(!f)print "NOT RUN\t-"; else if(rc==0)print "PASSED\t" d "s"; else print "FAILED (exit " rc ")\t" d "s"}' logs/summary.tsv)
+          RES=$(echo "$R" | cut -f1)
+          DUR=$(echo "$R" | cut -f2)
+          printf '%-40s %-16s %s\n' "$s" "$RES" "$DUR"
+          echo "| $s | $RES | $DUR |" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$RES" != "PASSED" ]; then FAILS=$((FAILS + 1)); fi
+        done
+        echo "================================================"
+        if [ "$FAILS" -eq 0 ]; then
+          echo "ALL TASKS PASSED"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**ALL TASKS PASSED**" >> "$GITHUB_STEP_SUMMARY"
+        else
+          echo "$FAILS task(s) did not pass, see the log above"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**$FAILS task(s) did not pass**" >> "$GITHUB_STEP_SUMMARY"
+        fi
+        echo "Log files:"
+        ls -la logs build.log 2>/dev/null || true
+
+    - name: Upload logs
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: workflow-logs-${{ github.run_number }}
+        path: |
+          logs/
+          build.log
+        if-no-files-found: warn
+
+    - name: Upload AnyKernel3 zip
+      uses: actions/upload-artifact@v4
+      with:
+        name: AnyKernel3-shiba-${{ env.lineage_branch }}-KSUNext-SUSFS
+        path: dist_output/AK3-*.zip
+        if-no-files-found: error
+
+    - name: Upload Raw boot.img
+      uses: actions/upload-artifact@v4
+      with:
+        name: boot-shiba-${{ env.lineage_branch }}-kernelsu-next-susfs.img
+        path: dist_output/boot.img
+        if-no-files-found: error
