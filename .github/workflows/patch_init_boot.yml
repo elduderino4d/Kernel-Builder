@@ -1,9 +1,9 @@
 name: Patch Pixel 8 (shiba) LineageOS init_boot with KernelSU (LKM)
 
 on:
-  workflow_dispatch: # Allows manual triggering from the GitHub Actions tab
+  workflow_dispatch:
   schedule:
-    - cron: '0 0 * * 0' # Optional: Automatically runs every Sunday at midnight
+    - cron: '0 0 * * 0'
 
 jobs:
   build:
@@ -13,31 +13,21 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y jq curl wget unzip
+        sudo apt-get install -y jq curl wget
 
-    - name: Fetch latest LineageOS (shiba) build
+    - name: Fetch latest LineageOS (shiba) init_boot
       run: |
-        # Query LineageOS API for the newest Pixel 8 build URL
-        BUILD_URL=$(curl -s "https://download.lineageos.org/api/v2/devices/shiba/builds" | jq -r '.[0].url')
-        echo "Downloading LineageOS from: $BUILD_URL"
-        wget -q "$BUILD_URL" -O lineageos.zip
+        # Query LineageOS API for the newest Pixel 8 build and extract the init_boot.img URL
+        INIT_BOOT_URL=$(curl -s "https://download.lineageos.org/api/v2/devices/shiba/builds" | jq -r '.[0].files[] | select(.filename == "init_boot.img") | .url')
         
-        # Extract the payload.bin from the ROM zip
-        unzip lineageos.zip payload.bin
-
-    - name: Setup payload-dumper-go
-      run: |
-        wget -qO payload-dumper-go.tar.gz https://github.com/ssut/payload-dumper-go/releases/latest/download/payload-dumper-go_linux_amd64.tar.gz
-        tar -xzf payload-dumper-go.tar.gz
-        sudo mv payload-dumper-go /usr/local/bin/
-
-    - name: Extract init_boot.img
-      run: |
-        # Extract only the init_boot partition to save time
-        payload-dumper-go -p init_boot payload.bin
+        # Failsafe check
+        if [ -z "$INIT_BOOT_URL" ] || [ "$INIT_BOOT_URL" == "null" ]; then
+          echo "Error: Could not find init_boot.img in the latest build API response."
+          exit 1
+        fi
         
-        # Move the file out of the timestamped extraction folder
-        mv extracted_*/init_boot.img init_boot.img
+        echo "Downloading init_boot.img from: $INIT_BOOT_URL"
+        wget -q "$INIT_BOOT_URL" -O init_boot.img
 
     - name: Setup magiskboot
       run: |
@@ -57,10 +47,10 @@ jobs:
 
     - name: Patch init_boot.img with KernelSU (LKM Mode)
       run: |
-        # Use ksud to inject the Kernel Module into the init_boot ramdisk
+        # Use ksud to inject the Kernel Module into the downloaded init_boot
         ksud boot-patch -b init_boot.img --magiskboot /usr/local/bin/magiskboot
         
-        # Verify generation
+        # Verify the patched file was created
         ls -la kernelsu_*.img || echo "Failed to locate patched image"
 
     - name: Upload Patched Artifact
