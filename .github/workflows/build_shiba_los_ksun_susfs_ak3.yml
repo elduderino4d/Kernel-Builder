@@ -1,0 +1,126 @@
+name: Build LineageOS Kernel (Pixel 8) with KernelSU-Next and SUSFS
+
+on:
+  workflow_dispatch:
+    inputs:
+      lineage_branch:
+        description: 'LineageOS branch (auto = newest available)'
+        required: false
+        default: 'lineage-23.2'
+
+jobs:
+  build-boot-image:
+    name: Build Pixel 8 LineageOS KernelSU-Next and SUSFS AnyKernel3 zip
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Init logging
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/.ci" "$GITHUB_WORKSPACE/logs"
+          cat > "$GITHUB_WORKSPACE/.ci/stepinit.sh" << 'HELPEREOF'
+          STEP_NAME="$1"
+          LOGDIR="$GITHUB_WORKSPACE/logs"
+          LOGFILE="$LOGDIR/full-workflow.log"
+          mkdir -p "$LOGDIR"
+          exec > >(tee -a "$LOGFILE") 2>&1
+          export PS4='+ [L${LINENO}] '
+          echo ""
+          echo "=================================================================="
+          echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] STEP START: ${STEP_NAME}"
+          echo "=================================================================="
+          STEP_T0=$(date +%s)
+          trap 'rc=$?; set +x; D=$(( $(date +%s) - STEP_T0 )); echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] STEP END: ${STEP_NAME} exit=${rc} duration=${D}s"; echo "disk: $(df -h / | tail -n 1)"; printf "%s\t%s\t%s\n" "${STEP_NAME}" "${rc}" "${D}" >> "$LOGDIR/summary.tsv"; sleep 1' EXIT
+          set -x
+          HELPEREOF
+          source "$GITHUB_WORKSPACE/.ci/stepinit.sh" "Init logging"
+          echo "Workflow: ${GITHUB_WORKFLOW}  run=${GITHUB_RUN_NUMBER}  attempt=${GITHUB_RUN_ATTEMPT}"
+          echo "Repo: ${GITHUB_REPOSITORY}  ref=${GITHUB_REF}  sha=${GITHUB_SHA}  actor=${GITHUB_ACTOR}"
+          echo "Runner: ${RUNNER_NAME:-} ${RUNNER_OS:-} ${RUNNER_ARCH:-}"
+          uname -a
+          head -n 5 /etc/os-release
+          nproc
+          free -m
+          df -h /
+          df -h "$GITHUB_WORKSPACE"
+          git --version
+          python3 --version
+          java -version 2>&1 || true
+          curl --version | head -n 1
+          zip -v | head -n 2
+          unzip -v | head -n 1
+          echo "Requested LineageOS branch input: ${{ inputs.lineage_branch }}"
+
+      - name: Install Dependencies
+        run: |
+          source "$GITHUB_WORKSPACE/.ci/stepinit.sh" "Install Dependencies"
+          sudo apt-get update
+          sudo apt-get install -y -V bc bison build-essential ccache curl flex g++-multilib gcc-multilib git gnupg gperf lib32ncurses5-dev lib32readline-dev lib32z1-dev liblz4-tool libncurses5 libncurses5-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 jq
+          mkdir -p ~/bin
+          curl -fSL -w '\nHTTP %{http_code} size=%{size_download}\n' https://storage.googleapis.com/git-repo-downloads/repo -o ~/bin/repo
+          chmod a+x ~/bin/repo
+          echo "$HOME/bin" >> $GITHUB_PATH
+          ls -la ~/bin/repo
+          head -n 3 ~/bin/repo
+
+      - name: Prepare AnyKernel3
+        run: |
+          source "$GITHUB_WORKSPACE/.ci/stepinit.sh" "Prepare AnyKernel3"
+          git clone -v --depth=1 https://github.com/osm0sis/AnyKernel3 AnyKernel3
+          echo "AnyKernel3 commit: $(git -C AnyKernel3 rev-parse HEAD)"
+          rm -rf AnyKernel3/.git AnyKernel3/.github AnyKernel3/README.md
+          if ! grep -q "SLOT_SELECT" AnyKernel3/tools/ak3-core.sh; then
+            echo "::error::This AnyKernel3 version has no SLOT_SELECT support, cannot flash both slots"
+            exit 1
+          fi
+          grep -n "SLOT_SELECT" AnyKernel3/tools/ak3-core.sh
+          cat > AnyKernel3/anykernel.sh << 'AKEOF'
+          ### AnyKernel3 Ramdisk Mod Script
+          properties() { '
+          kernel.string=KernelSU-Next + SUSFS for Pixel 8 (shiba) - LineageOS
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=0
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=shiba
+          supported.versions=
+          supported.patchlevels=
+          supported.vendorpatchlevels=
+          '; }
+
+          BLOCK=boot;
+          IS_SLOT_DEVICE=auto;
+          RAMDISK_COMPRESSION=auto;
+          PATCH_VBMETA_FLAG=auto;
+          SLOT_SELECT=active;
+
+          . tools/ak3-core.sh;
+
+          ui_print " ";
+          ui_print "Flashing kernel to the ACTIVE slot...";
+          split_boot;
+          flash_boot;
+
+          ui_print " ";
+          ui_print "Flashing kernel to the INACTIVE slot...";
+          BLOCK=boot;
+          IS_SLOT_DEVICE=auto;
+          RAMDISK_COMPRESSION=auto;
+          PATCH_VBMETA_FLAG=auto;
+          SLOT_SELECT=inactive;
+          reset_ak;
+          split_boot;
+          flash_boot;
+          AKEOF
+          echo "AnyKernel3 ready:"
+          ls -laR AnyKernel3 | head -n 80
+          cat AnyKernel3/anykernel.sh
+
+      - name: Sync LineageOS Kernel Tree
+        env:
+          INPUT_BRANCH: ${{ inputs.lineage_branch }}
+        run: |
+          source "$GITHUB_WORKSPACE/.ci/stepinit.sh" "Sync LineageOS Kernel Tree"
+          M=https://github.com/LineageOS/android_kerne
