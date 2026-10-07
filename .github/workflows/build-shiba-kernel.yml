@@ -70,4 +70,80 @@ jobs:
           mkdir -p fs include/linux
           cp ../susfs4ksu/kernel_patches/fs/* fs/
           cp ../susfs4ksu/kernel_patches/include/linux/* include/linux/
-          P=$(find ../susfs4ksu/kernel_patches -maxdepth 1 -name "50_add_susfs_in_*gki*${GKI_VERSION}*.patch" | sort -V | tail -n
+          P=$(find ../susfs4ksu/kernel_patches -maxdepth 1 -name "50_add_susfs_in_*gki*${GKI_VERSION}*.patch" | sort -V | tail -n 1)
+          if [ -z "$P" ]; then
+            echo "No exact match, using latest GKI patch..."
+            P=$(find ../susfs4ksu/kernel_patches -maxdepth 1 -name "50_add_susfs_in_*gki*.patch" | sort -V | tail -n 1)
+          fi
+          if [ -z "$P" ]; then
+            echo "::error::No SuSFS patch found"
+            ls ../susfs4ksu/kernel_patches
+            exit 1
+          fi
+          echo "Applying SuSFS patch: $P"
+          patch -p1 --forward < "$P" || echo "::warning::Patch had rejects"
+          find . -name '*.rej' -not -path './out/*' | head
+          for cfg in arch/arm64/configs/*_defconfig; do
+            sed -i '/CONFIG_KSU_SUSFS/d' "$cfg"
+          done
+          if grep -rq "config KSU_SUSFS$" --include='Kconfig*' fs kernel drivers; then
+            echo "SuSFS Kconfig already defined"
+          else
+            echo "Adding standalone SuSFS Kconfig to fs/Kconfig"
+            printf '\nmenu "SuSFS (standalone)"\n' >> fs/Kconfig
+            printf '\nconfig KSU_SUSFS\n\tbool "SuSFS support"\n\tdefault y\n' >> fs/Kconfig
+            for s in SUS_PATH SUS_MOUNT SUS_KSTAT SPOOF_UNAME OPEN_REDIRECT SUS_MAP HIDE_KSU_SUSFS_SYMBOLS SPOOF_CMDLINE_OR_BOOTCONFIG; do
+              printf '\nconfig KSU_SUSFS_%s\n\tbool "SuSFS %s"\n\tdepends on KSU_SUSFS\n\tdefault y\n' "$s" "$s" >> fs/Kconfig
+            done
+            printf '\nendmenu\n' >> fs/Kconfig
+          fi
+          tail -n 25 fs/Kconfig
+          echo "Defconfig SuSFS lines (should be none):"
+          grep -n KSU_SUSFS arch/arm64/configs/gki_defconfig || echo "none"
+
+      - name: Build boot.img
+        run: |
+          cd android-kernel
+          mkdir -p ../dist_output out/dist
+          K="${{ env.KERNEL_DIR }}"
+          sed -i '/CONFIG_KSU_SUSFS/d' "$K"/arch/arm64/configs/*_defconfig
+          {
+            echo "WORKFLOW v6 run ${{ github.run_number }}"
+            echo "KERNEL_DIR=$K"
+            echo "-----"
+          } > ../build.log
+          cat ../build.log
+          set +e
+          tools/bazel run --lto=thin --config=stamp //aosp:kernel_aarch64_dist -- --destdir="$PWD/out/dist" >> ../build.log 2>&1
+          RC=$?
+          set -e
+          tail -n 60 ../build.log
+          if [ $RC -ne 0 ]; then
+            echo "=========== BUILD FAILED (exit $RC) ==========="
+            echo "----- first ERROR lines -----"
+            grep -n -m 40 -E "ERROR|error:|fatal|FAILED|Unrecognized" ../build.log || true
+            exit 1
+          fi
+          find out -type f -name "boot*.img"
+          BOOT=$(find out -type f -name boot.img | head -n 1)
+          if [ -z "$BOOT" ]; then
+            echo "::error::boot.img not found in output"
+            find out -type f | head -n 50
+            exit 1
+          fi
+          cp "$BOOT" ../dist_output/boot.img
+
+      - name: Upload Build Log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ github.run_number }}
+          path: build.log
+          if-no-files-found: ignore
+
+      - name: Upload Raw boot.img
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-shiba-los23.2-susfs.img
+          path: dist_output/boot.img
+          if-no-files-found: error
