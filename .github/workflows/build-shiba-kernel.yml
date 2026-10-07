@@ -91,9 +91,16 @@ jobs:
       - name: Build boot.img
         run: |
           cd android-kernel
-          LTO=thin BUILD_BOOT_IMG=1 build/build.sh
+          ls
           mkdir -p ../dist_output
-          find out -type f -name "boot.img" -exec cp {} ../dist_output/boot.img \;
+          if [ -x build/build.sh ]; then
+            LTO=thin BUILD_BOOT_IMG=1 build/build.sh
+          else
+            tools/bazel run --lto=thin --config=stamp //aosp:kernel_aarch64_dist -- --destdir="$PWD/out/dist" \
+              || tools/bazel run --lto=thin --config=stamp //common:kernel_aarch64_dist -- --destdir="$PWD/out/dist"
+          fi
+          find out -type f -name "boot*.img"
+          cp "$(find out -type f -name boot.img | head -n 1)" ../dist_output/boot.img
 
       - name: Upload Raw boot.img
         uses: actions/upload-artifact@v4
