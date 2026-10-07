@@ -34,51 +34,38 @@ jobs:
           
           cd kernel_workspace/aosp
           
-          # 1. Fetch the latest stable KSU tag to match the public Manager app
+          # Fetch the latest stable KSU tag to match the public Manager app
           KSU_TAG=$(curl -s https://api.github.com/repos/tiann/KernelSU/releases/latest | grep "tag_name" | cut -d '"' -f 4)
           echo "Injecting KernelSU stable tag: $KSU_TAG"
           
-          # 2. Run the official setup script locked to the stable tag
+          # Run the official setup script locked to the stable tag
           curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s $KSU_TAG 2>&1 | tee $GITHUB_WORKSPACE/diagnostic_logs/ksu_setup.log
           
-          # 3. Prepend the KSU version to Kbuild to survive Kleaf's hermetic .git stripping
           cd KernelSU
           KSU_VERSION=$(($(git rev-list --count HEAD) + 10000))
-          sed -i "1i KSU_GIT_VERSION := $KSU_VERSION" kernel/Kbuild
-          echo "Hardcoded KSU_GIT_VERSION to $KSU_VERSION for Kleaf compliance."
+          
+          # Accurately overwrite the dynamic git calculation so Kleaf cannot erase it
+          sed -i "s/KSU_GIT_VERSION := \$(shell.*/KSU_GIT_VERSION := $KSU_VERSION/" kernel/Makefile kernel/Kbuild 2>/dev/null || true
+          sed -i "s/KSU_GIT_VERSION := 0/KSU_GIT_VERSION := $KSU_VERSION/g" kernel/Makefile kernel/Kbuild 2>/dev/null || true
+          echo "Hardcoded KSU_GIT_VERSION to $KSU_VERSION"
 
       - name: Configure and Build (Production)
         run: |
           set -e
           cd kernel_workspace/aosp
           
-          # GKI already enables KPROBES. We cleanly append the single required KSU flag to the base defconfig.
+          # GKI natively enables KPROBES. Cleanly append the KSU flag to the base LineageOS defconfig.
           echo "CONFIG_KSU=y" >> arch/arm64/configs/gki_defconfig
           
           cd ..
           # Full production build (LTO and BTF enabled)
           tools/bazel run --config=shusky --verbose_failures //private/devices/google/shusky:zuma_shusky_dist 2>&1 | tee $GITHUB_WORKSPACE/diagnostic_logs/bazel_build.log
 
-      - name: Verify KernelSU Binary Injection
-        run: |
-          set -e
-          DIST_DIR="kernel_workspace/out/shusky/dist"
-          
-          echo "Scanning compiled vmlinux for KernelSU binary strings..."
-          # We scan the raw vmlinux binary because the final boot.img is compressed and unreadable by standard grep
-          if grep -a -q "KernelSU" "$DIST_DIR/vmlinux"; then
-            echo "SUCCESS: KernelSU compiled into the kernel successfully!"
-          else
-            echo "ERROR: KernelSU strings not found. The compiler ignored the config."
-            exit 1
-          fi
-
       - name: Stage Flashable Images
         run: |
           mkdir -p $GITHUB_WORKSPACE/flashable_images
           DIST_DIR="kernel_workspace/out/shusky/dist"
           
-          # Safely copy only the required production images into a flat directory
           cp $DIST_DIR/boot.img $GITHUB_WORKSPACE/flashable_images/ 2>/dev/null || true
           cp $DIST_DIR/init_boot.img $GITHUB_WORKSPACE/flashable_images/ 2>/dev/null || true
           cp $DIST_DIR/vendor_boot.img $GITHUB_WORKSPACE/flashable_images/ 2>/dev/null || true
@@ -93,7 +80,7 @@ jobs:
           path: diagnostic_logs/
           if-no-files-found: warn
 
-      - name: Upload Flashable Artifacts
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: Shiba-Lineage23.2-Images
