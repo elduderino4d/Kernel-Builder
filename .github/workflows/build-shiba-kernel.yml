@@ -46,12 +46,12 @@ jobs:
           repo init -u https://github.com/LineageOS/android_kernel_google_gs-6.1_manifest.git -b ${{ env.lineage_branch }} --depth=1
           repo sync -c -j$(nproc --all) --no-tags --no-clone-bundle
 
-          # Find the real kernel source: has Makefile + fs/ + arch/arm64 + kernel/
           KDIR=""
           while IFS= read -r mk; do
             d=$(dirname "$mk")
             if [ -d "$d/fs" ] && [ -d "$d/arch/arm64" ] && [ -d "$d/kernel" ]; then
-              KDIR="$d"; break
+              KDIR="$d"
+              break
             fi
           done < <(find "$PWD" -maxdepth 4 -name Makefile -not -path '*/out/*' | sort)
 
@@ -66,31 +66,33 @@ jobs:
       - name: Patch Standalone SuSFS into Kernel
         run: |
           cd "${{ env.KERNEL_DIR }}"
-          pwd; ls
+          pwd
+          ls
 
-          # 1. Read kernel version
           K_VER=$(grep -E '^VERSION =' Makefile | awk '{print $3}')
           K_PATCH=$(grep -E '^PATCHLEVEL =' Makefile | awk '{print $3}')
           GKI_VERSION="${K_VER}.${K_PATCH}"
           echo "Detected kernel version: $GKI_VERSION"
 
-          # 2. Clone SuSFS (prefer matching branch, fall back to default)
           rm -rf ../susfs4ksu
           git clone --depth=1 -b "gki-android14-${GKI_VERSION}" https://gitlab.com/simonpunk/susfs4ksu.git ../susfs4ksu \
             || git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git ../susfs4ksu
 
-          # 3. Copy sources
           mkdir -p fs include/linux
           cp ../susfs4ksu/kernel_patches/fs/* fs/
           cp ../susfs4ksu/kernel_patches/include/linux/* include/linux/
 
-          # 4. Find matching patch
           MATCHED_PATCH=$(find ../susfs4ksu/kernel_patches -maxdepth 1 -name "50_add_susfs_in_*gki*${GKI_VERSION}*.patch" | sort -V | tail -n 1)
           if [ -z "$MATCHED_PATCH" ]; then
             echo "No exact match for ${GKI_VERSION}, using latest GKI patch..."
             MATCHED_PATCH=$(find ../susfs4ksu/kernel_patches -maxdepth 1 -name "50_add_susfs_in_*gki*.patch" | sort -V | tail -n 1)
           fi
-          [ -n "$MATCHED_PATCH" ] || { echo "::error::No SuSFS patch found"; ls ../susfs4ksu/kernel_patches; exit 1; }
+
+          if [ -z "$MATCHED_PATCH" ]; then
+            echo "::error::No SuSFS patch found"
+            ls ../susfs4ksu/kernel_patches
+            exit 1
+          fi
 
           echo "Applying SuSFS patch: $MATCHED_PATCH"
           patch -p1 --forward < "$MATCHED_PATCH" || {
@@ -98,7 +100,6 @@ jobs:
             find . -name '*.rej' | head
           }
 
-          # 5. Inject configs
           for cfg in arch/arm64/configs/gki_defconfig arch/arm64/configs/shiba_defconfig; do
             if [ -f "$cfg" ]; then
               echo "Injecting SuSFS configs into $cfg"
