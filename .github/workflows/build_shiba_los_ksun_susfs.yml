@@ -6,7 +6,7 @@ on:
       lineage_branch:
         description: 'LineageOS branch (auto = newest available)'
         required: false
-        default: 'auto'
+        default: 'lineage-23.2'
 
 jobs:
   build-boot-image:
@@ -134,7 +134,7 @@ jobs:
 
       - name: Integrate KernelSU-Next and SUSFS
         run: |
-          echo "WORKFLOW ksunext-susfs-v2 run ${{ github.run_number }}"
+          echo "WORKFLOW ksunext-susfs-v4 run ${{ github.run_number }}"
           cd "${{ env.KERNEL_DIR }}"
 
           KSU_REPO=https://github.com/pershoot/KernelSU-Next
@@ -162,8 +162,9 @@ jobs:
             echo "::error::This KernelSU-Next branch has no SUSFS support"
             exit 1
           fi
-          echo "KernelSU config symbols:"
-          grep -rhE '^config KSU' drivers/kernelsu --include=Kconfig || true
+          echo "KernelSU Kconfig (KSU and SUSFS entries):"
+          sed -n '/^config KSU$/,/^config KSU_DEBUG/p' drivers/kernelsu/Kconfig | head -n 40
+          grep -n -A8 -E '^config KSU_SUSFS$' drivers/kernelsu/Kconfig | head -n 30 || true
           echo "KernelSU version logic:"
           grep -n "VERSION" drivers/kernelsu/Makefile | head -n 20 || true
 
@@ -218,29 +219,10 @@ jobs:
             for r in $REJ; do echo "----- $r"; cat "$r"; done
             exit 1
           fi
-          echo "SUSFS patch applied. Checking fs/namespace.c header:"
-          sed -n '25,60p' fs/namespace.c
+          echo "SUSFS patch applied."
           ls include/linux/susfs_def.h
-
-          for cfg in arch/arm64/configs/*_defconfig; do
-            sed -i '/CONFIG_KSU/d' "$cfg"
-          done
-          for sym in KSU KSU_SUSFS KSU_MANUAL_HOOK; do
-            if [ "$sym" = "KSU" ] || grep -rqE "^config $sym\$" drivers/kernelsu fs/Kconfig; then
-              echo "CONFIG_$sym=y" >> arch/arm64/configs/gki_defconfig
-            fi
-          done
-          echo "Defconfig KSU lines:"
-          grep -n "CONFIG_KSU" arch/arm64/configs/gki_defconfig
-
-          cd "$GITHUB_WORKSPACE/android-kernel"
-          B="${{ env.KERNEL_REL }}/BUILD.bazel"
-          if grep -q "check_defconfig" "$B"; then
-            sed -i 's/check_defconfig *= *"[a-z]*"/check_defconfig = "disabled"/' "$B"
-          else
-            sed -i '0,/name = "kernel_aarch64",/s//name = "kernel_aarch64",\n    check_defconfig = "disabled",/' "$B"
-          fi
-          grep -n "check_defconfig" "$B" || echo "check_defconfig not set"
+          echo "Defconfig left untouched (KSU options come from Kconfig defaults)"
+          grep -c "CONFIG_KSU" arch/arm64/configs/gki_defconfig || true
 
       - name: Build boot.img
         run: |
@@ -257,7 +239,7 @@ jobs:
             exit 1
           fi
           {
-            echo "WORKFLOW ksunext-susfs-v2 run ${{ github.run_number }}"
+            echo "WORKFLOW ksunext-susfs-v4 run ${{ github.run_number }}"
             echo "LINEAGE_BRANCH=${{ env.lineage_branch }}"
             echo "TARGET=$TARGET"
             echo "-----"
@@ -276,6 +258,17 @@ jobs:
           fi
           find out -type f -name "boot*.img"
           find out/dist -maxdepth 1 -name "Image*"
+          VML=$(find out/dist -maxdepth 1 -name vmlinux | head -n 1)
+          if [ -n "$VML" ]; then
+            if grep -aq "susfs" "$VML" && grep -aq "ksu_" "$VML"; then
+              echo "Verified: KernelSU and SUSFS symbols are in vmlinux"
+            else
+              echo "::error::KernelSU or SUSFS symbols are missing from vmlinux, config did not enable them"
+              exit 1
+            fi
+          else
+            echo "::warning::vmlinux not found in dist, could not verify KernelSU/SUSFS"
+          fi
           BOOT=$(find out -type f -name boot.img | head -n 1)
           if [ -z "$BOOT" ]; then
             echo "::error::boot.img not found in output"
