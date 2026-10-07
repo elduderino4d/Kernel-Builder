@@ -1,4 +1,4 @@
-name: TEST Build LineageOS Kernel (Pixel 8) with Official KSU-Next & SUSFS
+name: Build LineageOS Kernel (Pixel 8) with Official KSU-Next & SUSFS
 on:
   workflow_dispatch:
     inputs:
@@ -18,7 +18,7 @@ jobs:
     - name: Init logging
       run: |
         mkdir -p "$GITHUB_WORKSPACE/.ci" "$GITHUB_WORKSPACE/logs"
-        touch "$GITHUB_WORKSPACE/build.log" # Ensure file exists for artifact upload
+        touch "$GITHUB_WORKSPACE/build.log"
         cat > "$GITHUB_WORKSPACE/.ci/stepinit.sh" << 'HELPEREOF'
         STEP_NAME="$1"
         LOGDIR="$GITHUB_WORKSPACE/logs"
@@ -183,7 +183,7 @@ jobs:
         source "$GITHUB_WORKSPACE/.ci/stepinit.sh" "Integrate KernelSU-Next and SUSFS"
         cd "${{ env.KERNEL_DIR }}"
         
-        # Switched to official KernelSU-Next repository and correct 'dev' branch
+        # Using official KernelSU-Next repository and correct 'dev' branch
         KSU_REPO=https://github.com/rifsxd/KernelSU-Next
         KSU_BRANCH=dev
         
@@ -234,7 +234,6 @@ jobs:
         fi
         grep -n "kernelsu" drivers/Makefile drivers/Kconfig
         
-        # Softened requirement to warning since official dev branch might not include SUSFS defaults yet
         if ! grep -rqi "susfs" drivers/kernelsu; then
           echo "::warning::This KernelSU-Next branch might lack built-in SUSFS hooks"
         fi
@@ -298,8 +297,25 @@ jobs:
         echo "SUSFS patch applied, no reject files remain."
         ls -la include/linux/susfs_def.h
         sed -n '25,60p' fs/namespace.c
-        echo "Defconfig left untouched (KSU options come from Kconfig defaults)"
-        grep -c "CONFIG_KSU" arch/arm64/configs/gki_defconfig || true
+        
+        echo "Injecting KernelSU and SUSFS configs into defconfigs..."
+        for cfg in arch/arm64/configs/gki_defconfig arch/arm64/configs/shiba_defconfig; do
+          if [ -f "$cfg" ]; then
+            echo "-> Modifying $cfg"
+            {
+              echo "CONFIG_KPROBES=y"
+              echo "CONFIG_HAVE_KPROBES=y"
+              echo "CONFIG_KPROBE_EVENTS=y"
+              echo "CONFIG_KSU=y"
+              echo "CONFIG_KSU_SUSFS=y"
+              echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
+              echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
+              echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y"
+              echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"
+            } >> "$cfg"
+          fi
+        done
+        
         git add -N . || true
         echo "Files changed in kernel tree (summary):"
         git diff --stat | tail -n 80
