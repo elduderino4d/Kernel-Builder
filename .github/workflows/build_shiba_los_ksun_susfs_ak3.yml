@@ -1,4 +1,4 @@
-name: Build LineageOS Kernel (Pixel 8) with Official KSU-Next & SUSFS
+name: TEST Build LineageOS Kernel (Pixel 8) with Official KSU-Next & SUSFS
 on:
   workflow_dispatch:
     inputs:
@@ -316,6 +316,12 @@ jobs:
           fi
         done
         
+        # Navigate back to Bazel workspace root to run config_update
+        cd "$GITHUB_WORKSPACE/android-kernel"
+        echo "Normalizing defconfig with Bazel to prevent savedefconfig mismatch..."
+        tools/bazel run //${{ env.KERNEL_REL }}:kernel_aarch64_config_update || echo "::warning::Bazel config_update failed, build might complain about savedefconfig."
+        
+        cd "${{ env.KERNEL_DIR }}"
         git add -N . || true
         echo "Files changed in kernel tree (summary):"
         git diff --stat | tail -n 80
@@ -328,7 +334,7 @@ jobs:
         source "$GITHUB_WORKSPACE/.ci/stepinit.sh" "Build boot.img"
         cd android-kernel
         mkdir -p ../dist_output out/dist
-        tools/bazel --version || true
+        tools/bazel version || true
         TARGET="//${{ env.KERNEL_REL }}:kernel_aarch64_dist"
         if ! tools/bazel query "$TARGET" >/dev/null 2>&1; then
           echo "Target $TARGET not found, searching..."
