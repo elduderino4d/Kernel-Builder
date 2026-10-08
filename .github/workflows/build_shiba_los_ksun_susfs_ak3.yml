@@ -195,9 +195,6 @@ jobs:
         git clone -v --single-branch -b "$KSU_BRANCH" "$KSU_REPO" KernelSU-Next
         KSU_COUNT=$(git -C KernelSU-Next rev-list --count HEAD)
         KSU_TAG=$(git -C KernelSU-Next describe --tags --abbrev=0 2>/dev/null || echo v0.0.1)
-        echo "KernelSU-Next commit: $(git -C KernelSU-Next rev-parse HEAD)"
-        echo "KernelSU-Next tag: $KSU_TAG"
-        echo "KernelSU-Next commit count: $KSU_COUNT (manager version should be $((30000 + KSU_COUNT)))"
         
         cp -rL KernelSU-Next/kernel drivers/kernelsu
         if [ ! -f drivers/kernelsu/uapi/app_profile.h ]; then
@@ -225,11 +222,6 @@ jobs:
           LN=$(grep -n '^endmenu' drivers/Kconfig | tail -n 1 | cut -d: -f1)
           sed -i "${LN}i source \"drivers/kernelsu/Kconfig\"" drivers/Kconfig
         fi
-        
-        echo "==== VERIFYING DRIVERS KCONFIG/MAKEFILE INJECTION ===="
-        tail -n 15 drivers/Kconfig
-        tail -n 10 drivers/Makefile
-        echo "======================================================"
         
         K_VER=$(grep -E '^VERSION =' Makefile | awk '{print $3}')
         K_PATCH=$(grep -E '^PATCHLEVEL =' Makefile | awk '{print $3}')
@@ -277,21 +269,22 @@ jobs:
           exit 1
         fi
         
-        echo "Forcing KernelSU and SUSFS configs to 'y' via Kconfig overrides..."
-        cat << 'EOF' > drivers/kernelsu/Kconfig.overrides
-        config KSU_OVERRIDES
-            def_bool y
-            select KPROBES
-            select HAVE_KPROBES
-            select KPROBE_EVENTS
-            select KSU
-            select KSU_SUSFS
-            select KSU_SUSFS_SUS_MOUNT
-            select KSU_SUSFS_SUS_PATH
-            select KSU_SUSFS_SUS_KSTAT
-            select KSU_SUSFS_SPOOF_UNAME
+        echo "Forcing KernelSU and SUSFS configs to default 'y' directly in Kconfig..."
+        cat << 'EOF' >> drivers/kernelsu/Kconfig
+        
+        config KSU
+            default y
+        config KSU_SUSFS
+            default y
+        config KSU_SUSFS_SUS_MOUNT
+            default y
+        config KSU_SUSFS_SUS_PATH
+            default y
+        config KSU_SUSFS_SUS_KSTAT
+            default y
+        config KSU_SUSFS_SPOOF_UNAME
+            default y
         EOF
-        sed -i '1i source "drivers/kernelsu/Kconfig.overrides"' drivers/kernelsu/Kconfig
 
         git add -N . || true
         git diff --stat | tail -n 80
@@ -302,19 +295,6 @@ jobs:
         cd android-kernel
         mkdir -p ../dist_output out/dist
         
-        echo "==== INJECTING POST_DEFCONFIG_CMDS INTO ANDROID BUILD SYSTEM ===="
-        find . -name "build.config*" -type f | while read f; do
-          cat << 'EOF' >> "$f"
-
-        POST_DEFCONFIG_CMDS="${POST_DEFCONFIG_CMDS}
-        echo \"--- EXECUTING POST_DEFCONFIG_CMDS INJECTION ON $f ---\"
-        ${KERNEL_DIR}/scripts/config --file ${OUT_DIR}/.config --enable KPROBES --enable HAVE_KPROBES --enable KPROBE_EVENTS --enable KSU --enable KSU_SUSFS --enable KSU_SUSFS_SUS_MOUNT --enable KSU_SUSFS_SUS_PATH --enable KSU_SUSFS_SUS_KSTAT --enable KSU_SUSFS_SPOOF_UNAME
-        make -C ${KERNEL_DIR} ${TOOL_ARGS} O=${OUT_DIR} olddefconfig
-        "
-        EOF
-        done
-        echo "================================================================="
-
         tools/bazel version || true
         TARGET="//${{ env.KERNEL_REL }}:kernel_aarch64_dist"
         if ! tools/bazel query "$TARGET" >/dev/null 2>&1; then
