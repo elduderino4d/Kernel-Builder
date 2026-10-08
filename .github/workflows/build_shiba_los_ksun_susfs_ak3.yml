@@ -1,4 +1,4 @@
-name: TEST Build LineageOS Kernel (Pixel 8) with Official KSU-Next & SUSFS
+name: Build LineageOS Kernel (Pixel 8) with Official KSU-Next & SUSFS
 on:
   workflow_dispatch:
     inputs:
@@ -183,7 +183,6 @@ jobs:
         source "$GITHUB_WORKSPACE/.ci/stepinit.sh" "Integrate KernelSU-Next and SUSFS"
         cd "${{ env.KERNEL_DIR }}"
         
-        # Using official KernelSU-Next repository and correct 'dev' branch
         KSU_REPO=https://github.com/rifsxd/KernelSU-Next
         KSU_BRANCH=dev
         
@@ -199,10 +198,7 @@ jobs:
         echo "KernelSU-Next commit: $(git -C KernelSU-Next rev-parse HEAD)"
         echo "KernelSU-Next tag: $KSU_TAG"
         echo "KernelSU-Next commit count: $KSU_COUNT (manager version should be $((30000 + KSU_COUNT)))"
-        echo "Repo kernel dir:"
-        ls -la KernelSU-Next/kernel | head -n 40
-        echo "app_profile.h locations:"
-        find KernelSU-Next -name 'app_profile.h'
+        
         cp -rL KernelSU-Next/kernel drivers/kernelsu
         if [ ! -f drivers/kernelsu/uapi/app_profile.h ]; then
           F=$(find KernelSU-Next -name 'app_profile.h' | head -n 1)
@@ -210,12 +206,10 @@ jobs:
             echo "::error::app_profile.h not found anywhere in KernelSU-Next"
             exit 1
           fi
-          echo "Copying $(dirname "$F") to drivers/kernelsu/uapi"
           mkdir -p drivers/kernelsu/uapi
           cp -rL "$(dirname "$F")"/. drivers/kernelsu/uapi/
         fi
-        ls drivers/kernelsu/uapi
-        echo "KernelSU files: $(find drivers/kernelsu -type f | wc -l)  symlinks: $(find drivers/kernelsu -type l | wc -l)"
+        
         KB=drivers/kernelsu/Kbuild
         [ -f "$KB" ] || KB=drivers/kernelsu/Makefile
         {
@@ -224,23 +218,19 @@ jobs:
           cat "$KB"
         } > "$KB.new"
         mv "$KB.new" "$KB"
-        echo "Version lines in $KB:"
-        grep -n "KSU_GIT_VERSION\|KSU_VERSION_TAG" "$KB" | head -n 30
         rm -rf KernelSU-Next
+        
         grep -q "kernelsu" drivers/Makefile || printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
         if ! grep -q "kernelsu" drivers/Kconfig; then
           LN=$(grep -n '^endmenu' drivers/Kconfig | tail -n 1 | cut -d: -f1)
           sed -i "${LN}i source \"drivers/kernelsu/Kconfig\"" drivers/Kconfig
         fi
-        grep -n "kernelsu" drivers/Makefile drivers/Kconfig
         
-        if ! grep -rqi "susfs" drivers/kernelsu; then
-          echo "::warning::This KernelSU-Next branch might lack built-in SUSFS hooks"
-        fi
+        echo "==== VERIFYING DRIVERS KCONFIG/MAKEFILE INJECTION ===="
+        tail -n 15 drivers/Kconfig
+        tail -n 10 drivers/Makefile
+        echo "======================================================"
         
-        echo "KernelSU Kconfig (KSU and SUSFS entries):"
-        sed -n '/^config KSU$/,/^config KSU_DEBUG/p' drivers/kernelsu/Kconfig | head -n 40
-        grep -n -A8 -E '^config KSU_SUSFS$' drivers/kernelsu/Kconfig | head -n 30 || true
         K_VER=$(grep -E '^VERSION =' Makefile | awk '{print $3}')
         K_PATCH=$(grep -E '^PATCHLEVEL =' Makefile | awk '{print $3}')
         GKI_VERSION="${K_VER}.${K_PATCH}"
@@ -249,28 +239,19 @@ jobs:
         SB=$(git ls-remote --heads "$SUSFS_URL" | awk -F'refs/heads/' '{print $2}' | grep -E "^gki-android[0-9]+-${GKI_VERSION}$" | sort -V | tail -n 1)
         if [ -z "$SB" ]; then
           echo "::error::No SUSFS branch found for kernel $GKI_VERSION"
-          git ls-remote --heads "$SUSFS_URL" | head -n 40
           exit 1
         fi
-        echo "Using SUSFS branch: $SB"
         rm -rf ../susfs4ksu
         git clone -v --depth=1 -b "$SB" "$SUSFS_URL" ../susfs4ksu
-        echo "SUSFS commit: $(git -C ../susfs4ksu rev-parse HEAD)"
-        ls -la ../susfs4ksu/kernel_patches
         mkdir -p fs include/linux
         cp -v ../susfs4ksu/kernel_patches/fs/* fs/
         cp -v ../susfs4ksu/kernel_patches/include/linux/* include/linux/
         P=$(find ../susfs4ksu/kernel_patches -maxdepth 1 -name "50_add_susfs_in_*.patch" | sort -V | tail -n 1)
-        if [ -z "$P" ]; then
-          echo "::error::No SUSFS kernel patch found"
-          ls ../susfs4ksu/kernel_patches
-          exit 1
-        fi
-        echo "Applying SUSFS patch: $P"
+        
         set +e
         patch -p1 --forward --verbose < "$P"
-        echo "patch exit code: $?"
         set -e
+        
         REJ=$(find . -name '*.rej' -not -path './out/*')
         if [ "$REJ" = "./fs/namespace.c.rej" ] && ! grep -q "susfs_def.h" fs/namespace.c; then
           echo "Applying the fs/namespace.c header hunk manually"
@@ -288,20 +269,21 @@ jobs:
         PYEOF
           rm -f fs/namespace.c.rej fs/namespace.c.orig
         fi
+        
         REJ=$(find . -name '*.rej' -not -path './out/*')
         if [ -n "$REJ" ]; then
           echo "::error::SUSFS patch did not apply cleanly"
           for r in $REJ; do echo "----- $r"; cat "$r"; done
           exit 1
         fi
-        echo "SUSFS patch applied, no reject files remain."
-        ls -la include/linux/susfs_def.h
-        sed -n '25,60p' fs/namespace.c
         
         echo "Forcing KernelSU and SUSFS configs to 'y' via Kconfig overrides..."
         cat << 'EOF' > drivers/kernelsu/Kconfig.overrides
         config KSU_OVERRIDES
             def_bool y
+            select KPROBES
+            select HAVE_KPROBES
+            select KPROBE_EVENTS
             select KSU
             select KSU_SUSFS
             select KSU_SUSFS_SUS_MOUNT
@@ -309,33 +291,36 @@ jobs:
             select KSU_SUSFS_SUS_KSTAT
             select KSU_SUSFS_SPOOF_UNAME
         EOF
-        
-        # Inject the overrides into drivers/kernelsu/Kconfig so they are sourced during Bazel config setup
         sed -i '1i source "drivers/kernelsu/Kconfig.overrides"' drivers/kernelsu/Kconfig
 
         git add -N . || true
-        echo "Files changed in kernel tree (summary):"
         git diff --stat | tail -n 80
-        git diff > "$GITHUB_WORKSPACE/logs/kernel-changes.diff" || true
-        git reset -q || true
-        ls -la "$GITHUB_WORKSPACE/logs/kernel-changes.diff"
 
     - name: Build boot.img
       run: |
         source "$GITHUB_WORKSPACE/.ci/stepinit.sh" "Build boot.img"
         cd android-kernel
         mkdir -p ../dist_output out/dist
+        
+        echo "==== INJECTING POST_DEFCONFIG_CMDS INTO ANDROID BUILD SYSTEM ===="
+        find . -name "build.config*" -type f | while read f; do
+          cat << 'EOF' >> "$f"
+
+        POST_DEFCONFIG_CMDS="${POST_DEFCONFIG_CMDS}
+        echo \"--- EXECUTING POST_DEFCONFIG_CMDS INJECTION ON $f ---\"
+        ${KERNEL_DIR}/scripts/config --file ${OUT_DIR}/.config --enable KPROBES --enable HAVE_KPROBES --enable KPROBE_EVENTS --enable KSU --enable KSU_SUSFS --enable KSU_SUSFS_SUS_MOUNT --enable KSU_SUSFS_SUS_PATH --enable KSU_SUSFS_SUS_KSTAT --enable KSU_SUSFS_SPOOF_UNAME
+        make -C ${KERNEL_DIR} ${TOOL_ARGS} O=${OUT_DIR} olddefconfig
+        "
+        EOF
+        done
+        echo "================================================================="
+
         tools/bazel version || true
         TARGET="//${{ env.KERNEL_REL }}:kernel_aarch64_dist"
         if ! tools/bazel query "$TARGET" >/dev/null 2>&1; then
-          echo "Target $TARGET not found, searching..."
           TARGET=$(tools/bazel query 'kind(copy_to_dist_dir, //...)' 2>/dev/null | grep -E 'kernel_aarch64_dist$' | head -n 1)
         fi
-        if [ -z "$TARGET" ]; then
-          echo "::error::No kernel_aarch64_dist target found"
-          tools/bazel query 'kind(copy_to_dist_dir, //...)' 2>&1 | head -n 40
-          exit 1
-        fi
+        
         {
           echo "WORKFLOW ksunext-susfs-v6 run ${{ github.run_number }}"
           echo "LINEAGE_BRANCH=${{ env.lineage_branch }}"
@@ -343,6 +328,7 @@ jobs:
           echo "-----"
         } > ../build.log
         cat ../build.log
+        
         set +e
         tools/bazel run --lto=thin --config=stamp --verbose_failures --announce_rc --subcommands --color=no --curses=no "$TARGET" -- --destdir="$PWD/out/dist" >> ../build.log 2>&1
         RC=$?
@@ -356,16 +342,24 @@ jobs:
           cat ../build.log
           echo "######## END BAZEL OUTPUT ########"
         } >> "$LOGFILE"
-        tail -n 60 ../build.log
-        grep -n "KernelSU-Next version\|KernelSU-Next tag\|SUSFS_VERSION" ../build.log || true
+        
+        echo "==== EXTRACTING KCONFIG WARNINGS ===="
+        grep -i "warning:" ../build.log | grep -iE "ksu|kprobe|susfs|unmet|dependency|selects" || echo "No Kconfig warnings found."
+        echo "====================================="
+        
+        echo "==== EXTRACTING GENERATED BAZEL .CONFIG ===="
+        find out/ -name ".config" -type f | while read conf; do
+          echo "--> Reading $conf"
+          grep -E "CONFIG_KSU|CONFIG_KPROBES|SUSFS" "$conf" || echo "Symbols completely missing from this file."
+        done
+        echo "============================================"
+
         if [ $RC -ne 0 ]; then
           echo "=========== BUILD FAILED (exit $RC) ==========="
-          echo "----- first ERROR lines -----"
           grep -n -m 40 -E "ERROR|error:|fatal|FAILED|Unrecognized" ../build.log || true
           exit 1
         fi
-        echo "Dist directory:"
-        ls -la out/dist
+        
         find out -type f -name "boot*.img"
         find out/dist -maxdepth 1 -name "Image*"
         VML=$(find out/dist -maxdepth 1 -name vmlinux | head -n 1)
@@ -379,10 +373,10 @@ jobs:
         else
           echo "::warning::vmlinux not found in dist, could not verify KernelSU/SUSFS"
         fi
+        
         BOOT=$(find out -type f -name boot.img | head -n 1)
         if [ -z "$BOOT" ]; then
           echo "::error::boot.img not found in output"
-          find out -type f | head -n 50
           exit 1
         fi
         cp -v "$BOOT" ../dist_output/boot.img
@@ -399,30 +393,24 @@ jobs:
         done
         if [ -z "$IMG" ]; then
           echo "::error::No kernel Image found in out/dist"
-          ls android-kernel/out/dist | head -n 50
           exit 1
         fi
-        echo "Using kernel image: $IMG"
-        ls -la "$IMG"
         cp -v "$IMG" AnyKernel3/
         ZIP="AK3-KSUNext-SUSFS-shiba-${{ env.lineage_branch }}-$(date +%Y%m%d).zip"
         cd AnyKernel3
         zip -r9 -v "../dist_output/$ZIP" . -x '.git*' 'README.md' '*placeholder'
         cd ..
-        ls -la dist_output
         unzip -l "dist_output/$ZIP"
 
     - name: Verify outputs
       run: |
         source "$GITHUB_WORKSPACE/.ci/stepinit.sh" "Verify outputs"
         cd "$GITHUB_WORKSPACE"
-        ls -la dist_output
         ZIP=$(ls dist_output/AK3-*.zip | head -n 1)
         if [ -z "$ZIP" ]; then
           echo "::error::No AnyKernel3 zip found"
           exit 1
         fi
-        echo "Zip integrity test:"
         unzip -t "$ZIP"
         for need in anykernel.sh META-INF/com/google/android/update-binary META-INF/com/google/android/updater-script tools/ak3-core.sh; do
           if unzip -l "$ZIP" | grep -q "$need"; then
@@ -438,26 +426,12 @@ jobs:
           echo "::error::No kernel image in zip"
           exit 1
         fi
-        echo "anykernel.sh inside the zip:"
-        unzip -p "$ZIP" anykernel.sh
-        echo "Checksums and sizes:"
         sha256sum "$ZIP" dist_output/boot.img
-        ls -la "$ZIP" dist_output/boot.img
         VML=$(find android-kernel/out/dist -maxdepth 1 -name vmlinux | head -n 1)
         if [ -n "$VML" ]; then
-          echo "Kernel version string:"
           strings -a "$VML" | grep -m1 "Linux version" || true
-          echo "KernelSU and SUSFS strings in vmlinux:"
           strings -a "$VML" | grep -iE "kernelsu|susfs" | sort -u | head -n 40 || true
-        else
-          echo "vmlinux not in dist, skipping string checks"
         fi
-        echo "Kernel config files in dist:"
-        find android-kernel/out/dist -maxdepth 2 \( -name '.config' -o -name 'defconfig' -o -name '*config*' \) | head -n 10
-        for c in $(find android-kernel/out/dist -maxdepth 2 -name '.config' | head -n 1); do
-          grep -E "CONFIG_KSU|CONFIG_KPROBES" "$c" || true
-        done
-        echo "Bazel build log KernelSU lines:"
         grep -n "KernelSU-Next version\|KernelSU-Next tag\|SUSFS_VERSION" build.log || true
 
     - name: Final summary
@@ -475,8 +449,6 @@ jobs:
           echo "| Step | Result | Duration |"
           echo "|---|---|---|"
         } >> "$GITHUB_STEP_SUMMARY"
-        echo ""
-        echo "================ TASK CHECKLIST ================"
         for s in "${EXPECTED[@]}"; do
           R=$(awk -F'\t' -v s="$s" '$1==s{rc=$2;d=$3;f=1} END{if(!f)print "NOT RUN\t-"; else if(rc==0)print "PASSED\t" d "s"; else print "FAILED (exit " rc ")\t" d "s"}' logs/summary.tsv)
           RES=$(echo "$R" | cut -f1)
@@ -485,18 +457,13 @@ jobs:
           echo "| $s | $RES | $DUR |" >> "$GITHUB_STEP_SUMMARY"
           if [ "$RES" != "PASSED" ]; then FAILS=$((FAILS + 1)); fi
         done
-        echo "================================================"
         if [ "$FAILS" -eq 0 ]; then
           echo "ALL TASKS PASSED"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "**ALL TASKS PASSED**" >> "$GITHUB_STEP_SUMMARY"
         else
           echo "$FAILS task(s) did not pass, see the log above"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "**$FAILS task(s) did not pass**" >> "$GITHUB_STEP_SUMMARY"
         fi
-        echo "Log files:"
-        ls -la logs build.log 2>/dev/null || true
 
     - name: Upload logs
       if: always()
