@@ -298,30 +298,21 @@ jobs:
         ls -la include/linux/susfs_def.h
         sed -n '25,60p' fs/namespace.c
         
-        echo "Injecting KernelSU and SUSFS configs into defconfigs..."
-        for cfg in arch/arm64/configs/gki_defconfig arch/arm64/configs/shiba_defconfig; do
-          if [ -f "$cfg" ]; then
-            echo "-> Modifying $cfg"
-            {
-              echo "CONFIG_KPROBES=y"
-              echo "CONFIG_HAVE_KPROBES=y"
-              echo "CONFIG_KPROBE_EVENTS=y"
-              echo "CONFIG_KSU=y"
-              echo "CONFIG_KSU_SUSFS=y"
-              echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
-              echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
-              echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y"
-              echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"
-            } >> "$cfg"
-          fi
-        done
+        echo "Forcing KernelSU and SUSFS configs to 'y' via Kconfig overrides..."
+        cat << 'EOF' > drivers/kernelsu/Kconfig.overrides
+        config KSU_OVERRIDES
+            def_bool y
+            select KSU
+            select KSU_SUSFS
+            select KSU_SUSFS_SUS_MOUNT
+            select KSU_SUSFS_SUS_PATH
+            select KSU_SUSFS_SUS_KSTAT
+            select KSU_SUSFS_SPOOF_UNAME
+        EOF
         
-        # Navigate back to Bazel workspace root to run config_update
-        cd "$GITHUB_WORKSPACE/android-kernel"
-        echo "Normalizing defconfig with Bazel to prevent savedefconfig mismatch..."
-        tools/bazel run //${{ env.KERNEL_REL }}:kernel_aarch64_config_update || echo "::warning::Bazel config_update failed, build might complain about savedefconfig."
-        
-        cd "${{ env.KERNEL_DIR }}"
+        # Inject the overrides into drivers/kernelsu/Kconfig so they are sourced during Bazel config setup
+        sed -i '1i source "drivers/kernelsu/Kconfig.overrides"' drivers/kernelsu/Kconfig
+
         git add -N . || true
         echo "Files changed in kernel tree (summary):"
         git diff --stat | tail -n 80
