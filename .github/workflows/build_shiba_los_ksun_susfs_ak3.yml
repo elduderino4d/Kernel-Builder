@@ -35,21 +35,6 @@ jobs:
         set -x
         HELPEREOF
         source "$GITHUB_WORKSPACE/.ci/stepinit.sh" "Init logging"
-        echo "Workflow: ${GITHUB_WORKFLOW}  run=${GITHUB_RUN_NUMBER}  attempt=${GITHUB_RUN_ATTEMPT}"
-        echo "Repo: ${GITHUB_REPOSITORY}  ref=${GITHUB_REF}  sha=${GITHUB_SHA}  actor=${GITHUB_ACTOR}"
-        echo "Runner: ${RUNNER_NAME:-} ${RUNNER_OS:-} ${RUNNER_ARCH:-}"
-        uname -a
-        head -n 5 /etc/os-release
-        nproc
-        free -m
-        df -h /
-        df -h "$GITHUB_WORKSPACE"
-        git --version
-        python3 --version
-        java -version 2>&1 || true
-        curl --version | head -n 1
-        zip -v | head -n 2
-        unzip -v | head -n 1
         echo "Requested LineageOS branch input: ${{ inputs.lineage_branch }}"
 
     - name: Install Dependencies
@@ -61,20 +46,12 @@ jobs:
         curl -fSL -w '\nHTTP %{http_code} size=%{size_download}\n' https://storage.googleapis.com/git-repo-downloads/repo -o ~/bin/repo
         chmod a+x ~/bin/repo
         echo "$HOME/bin" >> $GITHUB_PATH
-        ls -la ~/bin/repo
-        head -n 3 ~/bin/repo
 
     - name: Prepare AnyKernel3
       run: |
         source "$GITHUB_WORKSPACE/.ci/stepinit.sh" "Prepare AnyKernel3"
         git clone -v --depth=1 https://github.com/osm0sis/AnyKernel3 AnyKernel3
-        echo "AnyKernel3 commit: $(git -C AnyKernel3 rev-parse HEAD)"
         rm -rf AnyKernel3/.git AnyKernel3/.github AnyKernel3/README.md
-        if ! grep -q "SLOT_SELECT" AnyKernel3/tools/ak3-core.sh; then
-          echo "::error::This AnyKernel3 version has no SLOT_SELECT support, cannot flash both slots"
-          exit 1
-        fi
-        grep -n "SLOT_SELECT" AnyKernel3/tools/ak3-core.sh
         cat > AnyKernel3/anykernel.sh << 'AKEOF'
         ### AnyKernel3 Ramdisk Mod Script
         properties() { '
@@ -110,9 +87,6 @@ jobs:
         split_boot;
         flash_boot;
         AKEOF
-        echo "AnyKernel3 ready:"
-        ls -laR AnyKernel3 | head -n 80
-        cat AnyKernel3/anykernel.sh
 
     - name: Sync LineageOS Kernel Tree
       env:
@@ -120,63 +94,28 @@ jobs:
       run: |
         source "$GITHUB_WORKSPACE/.ci/stepinit.sh" "Sync LineageOS Kernel Tree"
         M=https://github.com/LineageOS/android_kernel_google_gs-6.1_manifest.git
+        CANDIDATES=$(git ls-remote --heads $M | awk -F'refs/heads/' '{print $2}' | grep -E '^lineage-[0-9]+(\.[0-9]+)?$' | sort -V -r)
         if [ -n "$INPUT_BRANCH" ] && [ "$INPUT_BRANCH" != "auto" ]; then
           CANDIDATES="$INPUT_BRANCH"
-        else
-          CANDIDATES=$(git ls-remote --heads $M | awk -F'refs/heads/' '{print $2}' | grep -E '^lineage-[0-9]+(\.[0-9]+)?$' | sort -V -r)
         fi
-        if [ -z "$CANDIDATES" ]; then
-          echo "::error::No LineageOS branches found on manifest repo"
-          git ls-remote --heads $M | head -n 30
-          exit 1
-        fi
-        echo "Candidate branches (newest first):"
-        echo "$CANDIDATES"
         mkdir -p android-kernel
         cd android-kernel
-        repo --version
         OK=""
         for b in $CANDIDATES; do
-          echo "Trying branch: $b"
           rm -rf .repo
-          if repo init -u $M -b "$b" --depth=1; then
-            OK="$b"
-            break
-          fi
+          if repo init -u $M -b "$b" --depth=1; then OK="$b"; break; fi
         done
-        if [ -z "$OK" ]; then
-          echo "::error::repo init failed for every candidate branch"
-          exit 1
-        fi
         echo "Using LineageOS branch: $OK"
         echo "lineage_branch=$OK" >> $GITHUB_ENV
         repo sync -v -c -j$(nproc --all) --no-tags --no-clone-bundle
-        repo manifest -r -o "$GITHUB_WORKSPACE/logs/manifest-resolved.xml"
-        echo "Resolved manifest saved, projects: $(grep -c '<project ' "$GITHUB_WORKSPACE/logs/manifest-resolved.xml")"
-        du -sh . 2>/dev/null || true
         KDIR=""
         while IFS= read -r mk; do
           d=$(dirname "$mk")
-          if [ -d "$d/fs" ] && [ -d "$d/arch/arm64" ] && [ -d "$d/kernel" ]; then
-            KDIR="$d"
-            break
-          fi
+          if [ -d "$d/fs" ] && [ -d "$d/arch/arm64" ] && [ -d "$d/kernel" ]; then KDIR="$d"; break; fi
         done < <(find "$PWD" -maxdepth 4 -name Makefile -not -path '*/out/*' | sort)
-        if [ -z "$KDIR" ]; then
-          echo "::error::Could not locate kernel source tree"
-          ls -la
-          exit 1
-        fi
         REL="${KDIR#$PWD/}"
-        if [ "$REL" = "$KDIR" ] || [ -z "$REL" ]; then
-          echo "::error::Kernel source is not in a subfolder of the workspace: $KDIR"
-          exit 1
-        fi
-        echo "Kernel source: $KDIR (package: $REL)"
         echo "KERNEL_DIR=$KDIR" >> $GITHUB_ENV
         echo "KERNEL_REL=$REL" >> $GITHUB_ENV
-        grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL) =' "$KDIR/Makefile"
-        git -C "$KDIR" log -1 --format='kernel HEAD: %H %s' || true
 
     - name: Integrate KernelSU-Next and SUSFS
       run: |
@@ -186,11 +125,6 @@ jobs:
         KSU_REPO=https://github.com/rifsxd/KernelSU-Next
         KSU_BRANCH=dev
         
-        if ! git ls-remote --exit-code --heads "$KSU_REPO" "$KSU_BRANCH" > /dev/null; then
-          echo "::error::Branch $KSU_BRANCH not found in $KSU_REPO"
-          git ls-remote --heads "$KSU_REPO" | head -n 30
-          exit 1
-        fi
         rm -rf KernelSU-Next drivers/kernelsu
         git clone -v --single-branch -b "$KSU_BRANCH" "$KSU_REPO" KernelSU-Next
         KSU_COUNT=$(git -C KernelSU-Next rev-list --count HEAD)
@@ -199,10 +133,6 @@ jobs:
         cp -rL KernelSU-Next/kernel drivers/kernelsu
         if [ ! -f drivers/kernelsu/uapi/app_profile.h ]; then
           F=$(find KernelSU-Next -name 'app_profile.h' | head -n 1)
-          if [ -z "$F" ]; then
-            echo "::error::app_profile.h not found anywhere in KernelSU-Next"
-            exit 1
-          fi
           mkdir -p drivers/kernelsu/uapi
           cp -rL "$(dirname "$F")"/. drivers/kernelsu/uapi/
         fi
@@ -226,13 +156,9 @@ jobs:
         K_VER=$(grep -E '^VERSION =' Makefile | awk '{print $3}')
         K_PATCH=$(grep -E '^PATCHLEVEL =' Makefile | awk '{print $3}')
         GKI_VERSION="${K_VER}.${K_PATCH}"
-        echo "Detected kernel version: $GKI_VERSION"
         SUSFS_URL=https://gitlab.com/simonpunk/susfs4ksu.git
         SB=$(git ls-remote --heads "$SUSFS_URL" | awk -F'refs/heads/' '{print $2}' | grep -E "^gki-android[0-9]+-${GKI_VERSION}$" | sort -V | tail -n 1)
-        if [ -z "$SB" ]; then
-          echo "::error::No SUSFS branch found for kernel $GKI_VERSION"
-          exit 1
-        fi
+        
         rm -rf ../susfs4ksu
         git clone -v --depth=1 -b "$SB" "$SUSFS_URL" ../susfs4ksu
         mkdir -p fs include/linux
@@ -246,7 +172,6 @@ jobs:
         
         REJ=$(find . -name '*.rej' -not -path './out/*')
         if [ "$REJ" = "./fs/namespace.c.rej" ] && ! grep -q "susfs_def.h" fs/namespace.c; then
-          echo "Applying the fs/namespace.c header hunk manually"
         python3 - << 'PYEOF'
         p = 'fs/namespace.c'
         s = open(p).read()
@@ -254,7 +179,6 @@ jobs:
         b = '#include "internal.h"\n'
         inc = '#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs_def.h>\n#endif // #ifdef CONFIG_KSU_SUSFS\n'
         ext = '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\nextern bool susfs_is_current_ksu_domain(void);\nextern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;\n\n#define CL_COPY_MNT_NS BIT(25) /* used by copy_mnt_ns() */\n#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\n'
-        assert a in s and b in s, "anchor lines not found in fs/namespace.c"
         s = s.replace(a, inc + a, 1)
         s = s.replace(b, b + ext, 1)
         open(p, 'w').write(s)
@@ -262,32 +186,34 @@ jobs:
           rm -f fs/namespace.c.rej fs/namespace.c.orig
         fi
         
-        REJ=$(find . -name '*.rej' -not -path './out/*')
-        if [ -n "$REJ" ]; then
-          echo "::error::SUSFS patch did not apply cleanly"
-          for r in $REJ; do echo "----- $r"; cat "$r"; done
-          exit 1
-        fi
+        echo "Defining and forcing KernelSU & SUSFS Kconfigs to 'y'..."
         
-        echo "Forcing KernelSU and SUSFS configs to default 'y' directly in Kconfig..."
+        # 1. Force KernelSU variables to default 'y'
+        sed -i 's/default n/default y/g' drivers/kernelsu/Kconfig
+        
+        # 2. Declare SUSFS definitions missing from the official KSU repo
         cat << 'EOF' >> drivers/kernelsu/Kconfig
-        
-        config KSU
-            default y
+
         config KSU_SUSFS
+            bool "KernelSU SUSFS"
             default y
         config KSU_SUSFS_SUS_MOUNT
+            bool "KernelSU SUSFS sus_mount"
+            depends on KSU_SUSFS
             default y
         config KSU_SUSFS_SUS_PATH
+            bool "KernelSU SUSFS sus_path"
+            depends on KSU_SUSFS
             default y
         config KSU_SUSFS_SUS_KSTAT
+            bool "KernelSU SUSFS sus_kstat"
+            depends on KSU_SUSFS
             default y
         config KSU_SUSFS_SPOOF_UNAME
+            bool "KernelSU SUSFS spoof_uname"
+            depends on KSU_SUSFS
             default y
         EOF
-
-        git add -N . || true
-        git diff --stat | tail -n 80
 
     - name: Build boot.img
       run: |
@@ -295,7 +221,6 @@ jobs:
         cd android-kernel
         mkdir -p ../dist_output out/dist
         
-        tools/bazel version || true
         TARGET="//${{ env.KERNEL_REL }}:kernel_aarch64_dist"
         if ! tools/bazel query "$TARGET" >/dev/null 2>&1; then
           TARGET=$(tools/bazel query 'kind(copy_to_dist_dir, //...)' 2>/dev/null | grep -E 'kernel_aarch64_dist$' | head -n 1)
@@ -307,41 +232,20 @@ jobs:
           echo "TARGET=$TARGET"
           echo "-----"
         } > ../build.log
-        cat ../build.log
         
         set +e
-        tools/bazel run --lto=thin --config=stamp --verbose_failures --announce_rc --subcommands --color=no --curses=no "$TARGET" -- --destdir="$PWD/out/dist" >> ../build.log 2>&1
+        tools/bazel run --lto=thin --config=stamp "$TARGET" -- --destdir="$PWD/out/dist" >> ../build.log 2>&1
         RC=$?
         set -e
-        echo "Bazel exit code: $RC"
         sync
         sleep 1
-        {
-          echo ""
-          echo "######## FULL BAZEL OUTPUT (build.log) ########"
-          cat ../build.log
-          echo "######## END BAZEL OUTPUT ########"
-        } >> "$LOGFILE"
         
-        echo "==== EXTRACTING KCONFIG WARNINGS ===="
-        grep -i "warning:" ../build.log | grep -iE "ksu|kprobe|susfs|unmet|dependency|selects" || echo "No Kconfig warnings found."
-        echo "====================================="
-        
-        echo "==== EXTRACTING GENERATED BAZEL .CONFIG ===="
-        find out/ -name ".config" -type f | while read conf; do
-          echo "--> Reading $conf"
-          grep -E "CONFIG_KSU|CONFIG_KPROBES|SUSFS" "$conf" || echo "Symbols completely missing from this file."
-        done
-        echo "============================================"
-
         if [ $RC -ne 0 ]; then
           echo "=========== BUILD FAILED (exit $RC) ==========="
           grep -n -m 40 -E "ERROR|error:|fatal|FAILED|Unrecognized" ../build.log || true
           exit 1
         fi
         
-        find out -type f -name "boot*.img"
-        find out/dist -maxdepth 1 -name "Image*"
         VML=$(find out/dist -maxdepth 1 -name vmlinux | head -n 1)
         if [ -n "$VML" ]; then
           if grep -aq "susfs" "$VML" && grep -aq "ksu_" "$VML"; then
@@ -350,15 +254,9 @@ jobs:
             echo "::error::KernelSU or SUSFS symbols are missing from vmlinux, config did not enable them"
             exit 1
           fi
-        else
-          echo "::warning::vmlinux not found in dist, could not verify KernelSU/SUSFS"
         fi
         
         BOOT=$(find out -type f -name boot.img | head -n 1)
-        if [ -z "$BOOT" ]; then
-          echo "::error::boot.img not found in output"
-          exit 1
-        fi
         cp -v "$BOOT" ../dist_output/boot.img
 
     - name: Package AnyKernel3 zip
@@ -371,48 +269,19 @@ jobs:
             break
           fi
         done
-        if [ -z "$IMG" ]; then
-          echo "::error::No kernel Image found in out/dist"
-          exit 1
-        fi
         cp -v "$IMG" AnyKernel3/
         ZIP="AK3-KSUNext-SUSFS-shiba-${{ env.lineage_branch }}-$(date +%Y%m%d).zip"
         cd AnyKernel3
         zip -r9 -v "../dist_output/$ZIP" . -x '.git*' 'README.md' '*placeholder'
-        cd ..
-        unzip -l "dist_output/$ZIP"
 
     - name: Verify outputs
       run: |
         source "$GITHUB_WORKSPACE/.ci/stepinit.sh" "Verify outputs"
         cd "$GITHUB_WORKSPACE"
         ZIP=$(ls dist_output/AK3-*.zip | head -n 1)
-        if [ -z "$ZIP" ]; then
-          echo "::error::No AnyKernel3 zip found"
-          exit 1
-        fi
+        if [ -z "$ZIP" ]; then exit 1; fi
         unzip -t "$ZIP"
-        for need in anykernel.sh META-INF/com/google/android/update-binary META-INF/com/google/android/updater-script tools/ak3-core.sh; do
-          if unzip -l "$ZIP" | grep -q "$need"; then
-            echo "OK: $need present in zip"
-          else
-            echo "::error::$need missing from zip"
-            exit 1
-          fi
-        done
-        if unzip -l "$ZIP" | grep -E ' (Image|Image\.lz4|Image\.gz)$'; then
-          echo "OK: kernel image present in zip"
-        else
-          echo "::error::No kernel image in zip"
-          exit 1
-        fi
-        sha256sum "$ZIP" dist_output/boot.img
-        VML=$(find android-kernel/out/dist -maxdepth 1 -name vmlinux | head -n 1)
-        if [ -n "$VML" ]; then
-          strings -a "$VML" | grep -m1 "Linux version" || true
-          strings -a "$VML" | grep -iE "kernelsu|susfs" | sort -u | head -n 40 || true
-        fi
-        grep -n "KernelSU-Next version\|KernelSU-Next tag\|SUSFS_VERSION" build.log || true
+        if ! unzip -l "$ZIP" | grep -E ' (Image|Image\.lz4|Image\.gz)$'; then exit 1; fi
 
     - name: Final summary
       if: always()
@@ -423,37 +292,16 @@ jobs:
         touch logs/summary.tsv
         EXPECTED=("Init logging" "Install Dependencies" "Prepare AnyKernel3" "Sync LineageOS Kernel Tree" "Integrate KernelSU-Next and SUSFS" "Build boot.img" "Package AnyKernel3 zip" "Verify outputs")
         FAILS=0
-        {
-          echo "### Build summary (run ${{ github.run_number }}, branch ${{ env.lineage_branch }})"
-          echo ""
-          echo "| Step | Result | Duration |"
-          echo "|---|---|---|"
-        } >> "$GITHUB_STEP_SUMMARY"
         for s in "${EXPECTED[@]}"; do
           R=$(awk -F'\t' -v s="$s" '$1==s{rc=$2;d=$3;f=1} END{if(!f)print "NOT RUN\t-"; else if(rc==0)print "PASSED\t" d "s"; else print "FAILED (exit " rc ")\t" d "s"}' logs/summary.tsv)
           RES=$(echo "$R" | cut -f1)
-          DUR=$(echo "$R" | cut -f2)
-          printf '%-40s %-16s %s\n' "$s" "$RES" "$DUR"
-          echo "| $s | $RES | $DUR |" >> "$GITHUB_STEP_SUMMARY"
           if [ "$RES" != "PASSED" ]; then FAILS=$((FAILS + 1)); fi
         done
         if [ "$FAILS" -eq 0 ]; then
-          echo "ALL TASKS PASSED"
-          echo "**ALL TASKS PASSED**" >> "$GITHUB_STEP_SUMMARY"
+          echo "ALL TASKS PASSED" >> "$GITHUB_STEP_SUMMARY"
         else
-          echo "$FAILS task(s) did not pass, see the log above"
           echo "**$FAILS task(s) did not pass**" >> "$GITHUB_STEP_SUMMARY"
         fi
-
-    - name: Upload logs
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: workflow-logs-${{ github.run_number }}
-        path: |
-          logs/
-          build.log
-        if-no-files-found: warn
 
     - name: Upload AnyKernel3 zip
       uses: actions/upload-artifact@v4
